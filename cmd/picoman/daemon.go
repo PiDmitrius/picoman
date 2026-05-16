@@ -354,7 +354,7 @@ func hostBootstrapLine(cfg *config.Config) (string, error) {
 		"ip=$(hostname -I 2>/dev/null | awk '{print $1}') && \\",
 		"([ -n \"$ip\" ] || { echo 'IPv4 address not found' >&2; exit 1; }) && \\",
 		"user=$(id -un) && \\",
-		"key=$(ssh-keyscan -t ed25519 -p 22 \"$ip\" 2>/dev/null | awk 'NF>=3{print $2\" \"$3; exit}') && \\",
+		"key=$(ssh-keyscan -t ed25519 -p 22 \"$ip\" 2>/dev/null | awk '($2 ~ /^(ssh|ecdsa)-/) && $3 {print $2\" \"$3; exit}') && \\",
 		"([ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; }) && \\",
 		"printf 'host add HOST_NAME %s@%s:22 %s\\n' \"$user\" \"$ip\" \"$key\"",
 	}, "\n"), nil
