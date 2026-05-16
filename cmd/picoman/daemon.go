@@ -46,6 +46,7 @@ func runDaemon() {
 	bot := tg.New(cfg.TelegramToken)
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
+		criticalNotifyUsers(cfg, bot, "outbox", err)
 		log.Fatalf("open outbox: %v", err)
 	}
 	defer out.Close()
@@ -54,9 +55,9 @@ func runDaemon() {
 	defer stopOutbox()
 	go out.Run(outboxCtx)
 	audit := newAuditState()
-	go runControl(ctx, cfg, st, out, audit)
+	go runControl(ctx, cfg, st, out, bot, audit)
 
-	notifyUsers(out, cfg, infoText(lifecycleText("started", cleanup)))
+	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
 
 	offset := int64(0)
 	for {
@@ -74,12 +75,12 @@ func runDaemon() {
 			if upd.Message.Text == "" {
 				continue
 			}
-			handleMessage(ctx, out, cfg, st, upd.Message)
+			handleMessage(ctx, out, cfg, st, bot, upd.Message)
 		}
 	}
 
 	cleanup = st.CleanStart()
-	notifyUsers(out, cfg, infoText(lifecycleText("stopped", cleanup)))
+	notifyUsers(out, cfg, bot, infoText(lifecycleText("stopped", cleanup)))
 	flushOutbox(out)
 	stopOutbox()
 }
@@ -92,20 +93,51 @@ func lifecycleText(event string, cleanup agent.CleanResult) string {
 	return text
 }
 
-func notifyUsers(out *outbox.Store, cfg *config.Config, text string) {
+func notifyUsers(out *outbox.Store, cfg *config.Config, bot *tg.Client, text string) {
 	for _, userID := range cfg.AllowedUsers {
 		if err := out.Enqueue(userID, text); err != nil {
 			log.Printf("enqueue notify user=%d: %v", userID, err)
+			go criticalNotifyUser(userID, bot, "outbox", err)
 		}
 	}
 }
 
-func notifyUsersHTML(out *outbox.Store, cfg *config.Config, text string) {
+func notifyUsersHTML(out *outbox.Store, cfg *config.Config, bot *tg.Client, text string) {
 	for _, userID := range cfg.AllowedUsers {
 		if err := out.EnqueueHTML(userID, text); err != nil {
 			log.Printf("enqueue notify user=%d: %v", userID, err)
+			go criticalNotifyUser(userID, bot, "outbox", err)
 		}
 	}
+}
+
+func criticalNotifyUsers(cfg *config.Config, bot *tg.Client, name string, err error) {
+	for _, userID := range cfg.AllowedUsers {
+		criticalNotifyUser(userID, bot, name, err)
+	}
+}
+
+func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
+	text := "❌ " + name + " error: " + shortError(err)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		sendErr := bot.SendMessage(ctx, userID, text)
+		cancel()
+		if sendErr == nil {
+			return
+		}
+		log.Printf("critical notify failed user=%d: %v", userID, sendErr)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func shortError(err error) string {
+	text := strings.TrimSpace(fmt.Sprint(err))
+	runes := []rune(text)
+	if len(runes) > 300 {
+		text = string(runes[:300]) + "..."
+	}
+	return text
 }
 
 func flushOutbox(out *outbox.Store) {
@@ -114,10 +146,12 @@ func flushOutbox(out *outbox.Store) {
 	out.Flush(ctx)
 }
 
-func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, msg tg.Message) {
+func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		log.Printf("deny user=%d username=%s text=%q", msg.From.ID, msg.From.Username, msg.Text)
-		_ = out.EnqueueReply(msg.Chat.ID, msg.MessageID, errorText("denied"))
+		if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, errorText("denied")); err != nil {
+			go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
+		}
 		return
 	}
 
@@ -147,6 +181,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		if err == nil {
 			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
 				log.Printf("enqueue reply: %v", enqueueErr)
+				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
 			}
 			return
 		}
@@ -163,6 +198,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 
 	if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, reply); err != nil {
 		log.Printf("enqueue reply: %v", err)
+		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
 	}
 }
 

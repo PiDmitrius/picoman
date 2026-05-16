@@ -15,9 +15,10 @@ import (
 	"picoman/internal/agent"
 	"picoman/internal/config"
 	"picoman/internal/outbox"
+	"picoman/internal/tg"
 )
 
-func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, audit *auditState) {
+func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client, audit *auditState) {
 	_ = os.Remove(cfg.ControlSocket)
 	ln, err := net.Listen("unix", cfg.ControlSocket)
 	if err != nil {
@@ -41,11 +42,11 @@ func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *o
 			}
 			continue
 		}
-		go handleControl(conn, cfg, st, out, audit)
+		go handleControl(conn, cfg, st, out, bot, audit)
 	}
 }
 
-func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outbox.Store, audit *auditState) {
+func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client, audit *auditState) {
 	defer conn.Close()
 
 	line, err := bufio.NewReader(conn).ReadString('\n')
@@ -63,11 +64,11 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		st.Unseal(string(data))
-		notifyUsers(out, cfg, successText("picoman "+version+" unsealed"))
+		notifyUsers(out, cfg, bot, successText("picoman "+version+" unsealed"))
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
 		st.Seal()
-		notifyUsers(out, cfg, successText("picoman "+version+" sealed"))
+		notifyUsers(out, cfg, bot, successText("picoman "+version+" sealed"))
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "ASKPASS":
 		passphrase := st.Passphrase()
@@ -84,19 +85,19 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		if err := st.Unlock(ttl); err != nil {
-			notifyUsers(out, cfg, errorText("picoman "+version+" unlock failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("picoman "+version+" unlock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, successText("🔓 picoman "+version+" unlocked until "+st.Until().Local().Format(time.RFC3339)))
+		notifyUsers(out, cfg, bot, successText("🔓 picoman "+version+" unlocked until "+st.Until().Local().Format(time.RFC3339)))
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "LOCK":
 		if err := st.Lock(); err != nil {
-			notifyUsers(out, cfg, errorText("picoman "+version+" lock failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("picoman "+version+" lock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, successText("🔒 picoman "+version+" locked"))
+		notifyUsers(out, cfg, bot, successText("🔒 picoman "+version+" locked"))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "LOGLEVEL "):
 		level := strings.TrimPrefix(line, "LOGLEVEL ")
@@ -104,7 +105,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR bad loglevel\n")
 			return
 		}
-		notifyUsers(out, cfg, successText("picoman "+version+" loglevel "+level))
+		notifyUsers(out, cfg, bot, successText("picoman "+version+" loglevel "+level))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "RUN "):
 		parts := strings.SplitN(strings.TrimPrefix(line, "RUN "), " ", 2)
@@ -119,14 +120,14 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		output, err := runTarget(context.Background(), cfg, st, parts[0], string(command))
 		if err != nil {
-			notifyUsers(out, cfg, errorText("picoman "+version+" run "+parts[0]+" failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("picoman "+version+" run "+parts[0]+" failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
 		if audit.LogLevel() == "all" {
-			notifyUsersHTML(out, cfg, runText(parts[0], string(command), output))
+			notifyUsersHTML(out, cfg, bot, runText(parts[0], string(command), output))
 		} else {
-			notifyUsers(out, cfg, successText("picoman "+version+" run "+parts[0]+" ok"))
+			notifyUsers(out, cfg, bot, successText("picoman "+version+" run "+parts[0]+" ok"))
 		}
 		_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(output))+"\n")
 	default:
