@@ -293,9 +293,9 @@ func statusText(st *agent.State) string {
 	var lines []string
 	lines = append(lines, "picoman "+version)
 	if st.Sealed() {
-		lines = append(lines, "❌ sealed")
+		lines = append(lines, "⚪ sealed")
 	} else {
-		lines = append(lines, "✅ unsealed")
+		lines = append(lines, "🟡 unsealed")
 	}
 	if st.IsUnlocked() {
 		lines = append(lines, "🟡 unlocked ("+leftText(st.Until())+")")
