@@ -202,12 +202,6 @@ func (s *State) IsUnlocked() bool {
 	return s.pid != 0 && time.Now().Before(s.until)
 }
 
-func (s *State) IsStarted() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.pid != 0
-}
-
 func (s *State) Until() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()

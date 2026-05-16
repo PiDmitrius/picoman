@@ -244,11 +244,6 @@ func statusText(st *agent.State) string {
 	} else {
 		lines = append(lines, "✅ unsealed")
 	}
-	if st.IsStarted() {
-		lines = append(lines, "✅ socket")
-	} else {
-		lines = append(lines, "❌ socket")
-	}
 	if st.IsUnlocked() {
 		lines = append(lines, "🟡 unlocked ("+leftText(st.Until())+")")
 	} else {
