@@ -74,10 +74,10 @@ func runDaemon() {
 	go runControl(ctx, cfg, st, out, bot, audit)
 	go watchUnlockExpiry(ctx, st, out, cfg, bot)
 
+	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
 	if autoUnsealed {
 		notifyUsers(out, cfg, bot, unsealText())
 	}
-	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
 
 	offset := int64(0)
 	for {
