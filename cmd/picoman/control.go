@@ -68,7 +68,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
 		st.Seal()
-		notifyUsers(out, cfg, bot, successText("picoman "+version+" sealed"))
+		notifyUsers(out, cfg, bot, "⚪ sealed")
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "ASKPASS":
 		passphrase := st.Passphrase()
@@ -85,19 +85,19 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		if err := st.Unlock(ttl); err != nil {
-			notifyUsers(out, cfg, bot, errorText("picoman "+version+" unlock failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("unlock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, "🟡 picoman "+version+" unlocked ("+leftText(st.Until())+")")
+		notifyUsers(out, cfg, bot, "🟡 unlocked ("+leftText(st.Until())+")")
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "LOCK":
 		if err := st.Lock(); err != nil {
-			notifyUsers(out, cfg, bot, errorText("picoman "+version+" lock failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("lock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, "🔒 picoman "+version+" locked")
+		notifyUsers(out, cfg, bot, "🔒 locked")
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "LOGLEVEL "):
 		level := strings.TrimPrefix(line, "LOGLEVEL ")
@@ -105,7 +105,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR bad loglevel\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("picoman "+version+" loglevel "+level))
+		notifyUsers(out, cfg, bot, successText("loglevel "+level))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "RUN "):
 		parts := strings.SplitN(strings.TrimPrefix(line, "RUN "), " ", 2)
@@ -120,7 +120,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		output, err := runTarget(context.Background(), cfg, st, parts[0], string(command))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("picoman "+version+" run "+parts[0]+" failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("run "+parts[0]+" failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
@@ -148,7 +148,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyFromTarget(context.Background(), cfg, st, parts[0], string(remoteName), string(localName))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("picoman "+version+" get "+parts[0]+" failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("get "+parts[0]+" failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
@@ -172,7 +172,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyToTarget(context.Background(), cfg, st, parts[0], string(localName), string(remoteName))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("picoman "+version+" put "+parts[0]+" failed: "+err.Error()))
+			notifyUsers(out, cfg, bot, errorText("put "+parts[0]+" failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
