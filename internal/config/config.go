@@ -14,6 +14,7 @@ type Target struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
+	WorkDir   string `json:"work_dir,omitempty"`
 	Disabled  bool   `json:"disabled,omitempty"`
 	Note      string `json:"note,omitempty"`
 }
@@ -32,6 +33,8 @@ type Config struct {
 	MaxUnlockTTL  string            `json:"max_unlock_ttl"`
 	SourceDir     string            `json:"source_dir"`
 	HostDB        string            `json:"host_db"`
+	WorkDir       string            `json:"work_dir"`
+	RemoteWorkDir string            `json:"remote_work_dir"`
 	Targets       map[string]Target `json:"targets"`
 }
 
@@ -60,11 +63,14 @@ func KnownHostsPath() string {
 }
 
 func Default() *Config {
+	home, _ := os.UserHomeDir()
 	return &Config{
 		AgentSocket:   filepath.Join(DataDir(), "agent.sock"),
 		ControlSocket: filepath.Join(DataDir(), "control.sock"),
 		MaxUnlockTTL:  "15m",
 		HostDB:        filepath.Join(Dir(), "hosts.json"),
+		WorkDir:       filepath.Join(home, "picoman"),
+		RemoteWorkDir: "~/picoman",
 		Targets:       map[string]Target{},
 	}
 }
@@ -192,6 +198,12 @@ func normalize(c *Config) *Config {
 	}
 	if c.HostDB == "" {
 		c.HostDB = def.HostDB
+	}
+	if c.WorkDir == "" {
+		c.WorkDir = def.WorkDir
+	}
+	if c.RemoteWorkDir == "" {
+		c.RemoteWorkDir = def.RemoteWorkDir
 	}
 	if c.Targets == nil {
 		c.Targets = map[string]Target{}

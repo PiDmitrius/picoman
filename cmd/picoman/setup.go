@@ -36,6 +36,8 @@ func runSetup() {
 	cfg.MaxUnlockTTL = promptDurationKeep(reader, "Max unlock TTL", cfg.MaxUnlockTTL)
 	cfg.SourceDir = expandPathValue(promptStringKeep(reader, "Source directory", displayPathValue(defaultSourceDir(cfg.SourceDir))), "")
 	cfg.HostDB = expandPathValue(promptStringKeep(reader, "Host database", displayPathValue(cfg.HostDB)), "")
+	cfg.WorkDir = expandPathValue(promptStringKeep(reader, "Local work directory", displayPathValue(cfg.WorkDir)), "")
+	cfg.RemoteWorkDir = promptStringKeep(reader, "Remote work directory", cfg.RemoteWorkDir)
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

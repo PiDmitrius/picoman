@@ -40,6 +40,10 @@ func runDaemon() {
 		criticalNotifyUsers(cfg, bot, "hostdb", err)
 		log.Fatalf("load host db: %v", err)
 	}
+	if err := os.MkdirAll(cfg.WorkDir, 0o700); err != nil {
+		criticalNotifyUsers(cfg, bot, "workdir", err)
+		log.Fatalf("create work dir: %v", err)
+	}
 
 	writePID()
 	defer removePID()
