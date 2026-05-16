@@ -246,8 +246,8 @@ commands:
 /host <name>
 /host add
 /run <target> <command>
-/get <target> <remote-file> <local-file>
-/put <target> <local-file> <remote-file>
+/get <target> <remote-file> [local-file]
+/put <target> <local-file> [remote-file]
 `)
 }
 
@@ -504,23 +504,36 @@ func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 }
 
 func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
-	if len(fields) != 4 {
-		return "", errors.New("usage: get <target> <remote-file> <local-file>")
+	if len(fields) < 3 || len(fields) > 4 {
+		return "", errors.New("usage: get <target> <remote-file> [local-file]")
 	}
-	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], fields[3]); err != nil {
+	localName := defaultTransferName(fields[2])
+	if len(fields) == 4 {
+		localName = fields[3]
+	}
+	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
 		return "", err
 	}
-	return successText("get " + fields[1] + " " + fields[2] + " -> " + fields[3]), nil
+	return successText("get " + fields[1] + " " + fields[2] + " -> " + localName), nil
 }
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
-	if len(fields) != 4 {
-		return "", errors.New("usage: put <target> <local-file> <remote-file>")
+	if len(fields) < 3 || len(fields) > 4 {
+		return "", errors.New("usage: put <target> <local-file> [remote-file]")
 	}
-	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], fields[3]); err != nil {
+	remoteName := defaultTransferName(fields[2])
+	if len(fields) == 4 {
+		remoteName = fields[3]
+	}
+	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
 		return "", err
 	}
-	return successText("put " + fields[1] + " " + fields[2] + " -> " + fields[3]), nil
+	return successText("put " + fields[1] + " " + fields[2] + " -> " + remoteName), nil
+}
+
+func defaultTransferName(name string) string {
+	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	return path.Base(clean)
 }
 
 func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (string, error) {

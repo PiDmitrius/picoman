@@ -266,12 +266,16 @@ func runLocalRun(args []string) {
 }
 
 func runLocalGet(args []string) {
-	if len(args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: picoman get <target> <remote-file> <local-file>")
+	if len(args) < 2 || len(args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman get <target> <remote-file> [local-file]")
 		os.Exit(1)
 	}
+	localName := defaultTransferName(args[1])
+	if len(args) == 3 {
+		localName = args[2]
+	}
 	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "GET "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(args[2])))
+	resp, err := controlRequest(cfg.ControlSocket, "GET "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(localName)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -280,12 +284,16 @@ func runLocalGet(args []string) {
 }
 
 func runLocalPut(args []string) {
-	if len(args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: picoman put <target> <local-file> <remote-file>")
+	if len(args) < 2 || len(args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman put <target> <local-file> [remote-file]")
 		os.Exit(1)
 	}
+	remoteName := defaultTransferName(args[1])
+	if len(args) == 3 {
+		remoteName = args[2]
+	}
 	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "PUT "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(args[2])))
+	resp, err := controlRequest(cfg.ControlSocket, "PUT "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(remoteName)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
