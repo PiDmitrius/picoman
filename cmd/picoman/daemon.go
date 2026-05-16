@@ -181,6 +181,13 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		reply = infoText(hostsText(cfg))
 	case "host":
 		reply, err = handleHost(fields, cfg)
+		if err == nil && strings.HasPrefix(reply, "<pre><code>") {
+			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
+				log.Printf("enqueue reply: %v", enqueueErr)
+				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
+			}
+			return
+		}
 	case "unlock":
 		reply, err = handleUnlock(fields, st)
 	case "lock":
@@ -227,7 +234,7 @@ commands:
 /status
 /hosts
 /host <name>
-/host add <name>
+/host add
 /run <target> <command>
 `)
 }
@@ -297,16 +304,23 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 		return infoText(hostText(fields[1], target)), nil
 	}
 	if len(fields) >= 3 && fields[1] == "add" {
-		if len(fields) == 3 {
-			line, err := hostBootstrapLine(fields[2], cfg)
+		if len(fields) == 3 && fields[2] == "shell" {
+			line, err := hostBootstrapLine(cfg)
 			if err != nil {
 				return "", err
 			}
-			return infoText("run on target:\n" + line), nil
+			return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
 		}
 		return addHostFromFields(fields[2:], cfg)
 	}
-	return "", errors.New("usage: host <name> | host add <name> [user@host:port keytype key]")
+	if len(fields) == 2 && fields[1] == "add" {
+		line, err := hostBootstrapLine(cfg)
+		if err != nil {
+			return "", err
+		}
+		return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
+	}
+	return "", errors.New("usage: host <name> | host add | host add <name> <user>@<host>:<port> <keytype> <key>")
 }
 
 func hostText(name string, target config.Target) string {
@@ -321,10 +335,7 @@ func hostText(name string, target config.Target) string {
 	return fmt.Sprintf("%s\n%s@%s:%d%s", name, target.User, target.Host, port, state)
 }
 
-func hostBootstrapLine(name string, cfg *config.Config) (string, error) {
-	if !validTargetName(name) {
-		return "", fmt.Errorf("bad host name %q", name)
-	}
+func hostBootstrapLine(cfg *config.Config) (string, error) {
 	data, err := os.ReadFile(cfg.KeyPath + ".pub")
 	if err != nil {
 		return "", err
@@ -334,7 +345,6 @@ func hostBootstrapLine(name string, cfg *config.Config) (string, error) {
 		return "", errors.New("empty public key")
 	}
 	return strings.Join([]string{
-		"name=" + shellQuote(name) + ";",
 		"pub=" + shellQuote(pub) + ";",
 		"mkdir -p ~/.ssh;",
 		"chmod 700 ~/.ssh;",
@@ -346,7 +356,7 @@ func hostBootstrapLine(name string, cfg *config.Config) (string, error) {
 		"user=$(id -un);",
 		"key=$(ssh-keyscan -t ed25519 -p 22 \"$host\" 2>/dev/null | awk 'NF>=3{print $2\" \"$3; exit}');",
 		"[ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; };",
-		"printf 'host add %s %s@%s:22 %s\\n' \"$name\" \"$user\" \"$host\" \"$key\"",
+		"printf 'host add NAME %s@%s:22 %s\\n' \"$user\" \"$host\" \"$key\"",
 	}, " "), nil
 }
 
