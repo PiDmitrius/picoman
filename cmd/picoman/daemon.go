@@ -528,7 +528,7 @@ func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
 		return "", err
 	}
-	return transferText("get", fields[1], fields[2], localName), nil
+	return transferText("⬅️ get", fields[1], fields[2], localName), nil
 }
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -542,7 +542,7 @@ func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
 		return "", err
 	}
-	return transferText("put", fields[1], fields[2], remoteName), nil
+	return transferText("➡️ put", fields[1], fields[2], remoteName), nil
 }
 
 func defaultTransferName(name string) string {
@@ -800,13 +800,17 @@ func warningText(s string) string { return "⚠️ " + s }
 func infoText(s string) string    { return "ℹ️ " + s }
 
 func runText(target, command, output string) string {
-	return "✅ <b>" + html.EscapeString(target) + "</b>" +
+	return actionText("▶️ run", target) +
 		"\n<pre><code>" + html.EscapeString(command) + "</code></pre>" +
 		"\n<pre><code>" + html.EscapeString(output) + "</code></pre>"
 }
 
+func actionText(action, target string) string {
+	return "✅ " + html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
+}
+
 func transferText(op, target, source, destination string) string {
-	text := "✅ " + html.EscapeString(op) + " <b>" + html.EscapeString(target) + "</b>" +
+	text := actionText(op, target) +
 		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
 	if destination != source {
 		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"

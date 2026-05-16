@@ -127,7 +127,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		if audit.LogLevel() == "all" {
 			notifyUsersHTML(out, cfg, bot, runText(parts[0], string(command), output))
 		} else {
-			notifyUsers(out, cfg, bot, successText("picoman "+version+" run "+parts[0]+" ok"))
+			notifyUsersHTML(out, cfg, bot, actionText("▶️ run", parts[0]))
 		}
 		_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(output))+"\n")
 	case strings.HasPrefix(line, "GET "):
@@ -152,7 +152,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsersHTML(out, cfg, bot, transferText("picoman "+version+" get", parts[0], string(remoteName), string(localName)))
+		notifyUsersHTML(out, cfg, bot, transferText("⬅️ get", parts[0], string(remoteName), string(localName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "PUT "):
 		parts := strings.Split(strings.TrimPrefix(line, "PUT "), " ")
@@ -176,7 +176,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsersHTML(out, cfg, bot, transferText("picoman "+version+" put", parts[0], string(localName), string(remoteName)))
+		notifyUsersHTML(out, cfg, bot, transferText("➡️ put", parts[0], string(localName), string(remoteName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	default:
 		_, _ = io.WriteString(conn, "ERR unknown command\n")
