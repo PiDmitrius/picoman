@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"html"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -173,6 +177,10 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		reply = infoText(botHelpText())
 	case "status":
 		reply = infoText(statusText(st))
+	case "hosts":
+		reply = infoText(hostsText(cfg))
+	case "host":
+		reply, err = handleHost(fields, cfg)
 	case "unlock":
 		reply, err = handleUnlock(fields, st)
 	case "lock":
@@ -217,6 +225,9 @@ commands:
 /unlock
 /lock
 /status
+/hosts
+/host <name>
+/host add <name>
 /run <target> <command>
 `)
 }
@@ -263,6 +274,179 @@ func leftText(until time.Time) string {
 	}
 	minutes := int((left + time.Minute - time.Nanosecond) / time.Minute)
 	return fmt.Sprintf("%dm left", minutes)
+}
+
+func hostsText(cfg *config.Config) string {
+	if len(cfg.Targets) == 0 {
+		return "hosts empty"
+	}
+	names := make([]string, 0, len(cfg.Targets))
+	for name := range cfg.Targets {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	return "hosts\n" + strings.Join(names, "\n")
+}
+
+func handleHost(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) == 2 {
+		target, ok := cfg.Targets[fields[1]]
+		if !ok {
+			return "", fmt.Errorf("unknown host %q", fields[1])
+		}
+		return infoText(hostText(fields[1], target)), nil
+	}
+	if len(fields) >= 3 && fields[1] == "add" {
+		if len(fields) == 3 {
+			line, err := hostBootstrapLine(fields[2], cfg)
+			if err != nil {
+				return "", err
+			}
+			return infoText("run on target:\n" + line), nil
+		}
+		return addHostFromFields(fields[2:], cfg)
+	}
+	return "", errors.New("usage: host <name> | host add <name> [user@host:port keytype key]")
+}
+
+func hostText(name string, target config.Target) string {
+	port := target.Port
+	if port == 0 {
+		port = 22
+	}
+	state := ""
+	if target.Disabled {
+		state = "\ndisabled"
+	}
+	return fmt.Sprintf("%s\n%s@%s:%d%s", name, target.User, target.Host, port, state)
+}
+
+func hostBootstrapLine(name string, cfg *config.Config) (string, error) {
+	if !validTargetName(name) {
+		return "", fmt.Errorf("bad host name %q", name)
+	}
+	data, err := os.ReadFile(cfg.KeyPath + ".pub")
+	if err != nil {
+		return "", err
+	}
+	pub := strings.TrimSpace(string(data))
+	if pub == "" {
+		return "", errors.New("empty public key")
+	}
+	return strings.Join([]string{
+		"name=" + shellQuote(name) + ";",
+		"pub=" + shellQuote(pub) + ";",
+		"mkdir -p ~/.ssh;",
+		"chmod 700 ~/.ssh;",
+		"touch ~/.ssh/authorized_keys;",
+		"grep -qxF \"$pub\" ~/.ssh/authorized_keys || printf '%s\\n' \"$pub\" >> ~/.ssh/authorized_keys;",
+		"chmod 600 ~/.ssh/authorized_keys;",
+		"host=$(hostname -I 2>/dev/null | awk '{print $1}');",
+		"[ -n \"$host\" ] || host=$(hostname -f);",
+		"user=$(id -un);",
+		"key=$(ssh-keyscan -t ed25519 -p 22 \"$host\" 2>/dev/null | awk 'NF>=3{print $2\" \"$3; exit}');",
+		"[ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; };",
+		"printf 'host add %s %s@%s:22 %s\\n' \"$name\" \"$user\" \"$host\" \"$key\"",
+	}, " "), nil
+}
+
+func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) != 4 {
+		return "", errors.New("usage: host add <name> <user>@<host>:<port> <keytype> <key>")
+	}
+	name := fields[0]
+	if !validTargetName(name) {
+		return "", fmt.Errorf("bad host name %q", name)
+	}
+	user, host, port, err := parseTargetAddress(fields[1])
+	if err != nil {
+		return "", err
+	}
+	publicKey := fields[2] + " " + fields[3]
+	if _, err := publicKeyFingerprint(publicKey); err != nil {
+		return "", err
+	}
+	if cfg.Targets == nil {
+		cfg.Targets = map[string]config.Target{}
+	}
+	cfg.Targets[name] = config.Target{
+		User:      user,
+		Host:      host,
+		Port:      port,
+		PublicKey: publicKey,
+	}
+	if err := config.SaveHostDB(cfg); err != nil {
+		return "", err
+	}
+	fp, _ := publicKeyFingerprint(publicKey)
+	return successText("host added\n" + name + "\n" + fmt.Sprintf("%s@%s:%d\n%s", user, host, port, fp)), nil
+}
+
+func parseTargetAddress(value string) (string, string, int, error) {
+	at := strings.LastIndex(value, "@")
+	if at <= 0 || at == len(value)-1 {
+		return "", "", 0, errors.New("target must be user@host:port")
+	}
+	user := value[:at]
+	hostPort := value[at+1:]
+	host, portText, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		host = hostPort
+		portText = "22"
+		if i := strings.LastIndex(hostPort, ":"); i > 0 && strings.Count(hostPort, ":") == 1 {
+			host = hostPort[:i]
+			portText = hostPort[i+1:]
+		}
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", "", 0, errors.New("bad port")
+	}
+	if user == "" || host == "" {
+		return "", "", 0, errors.New("target must be user@host:port")
+	}
+	return user, host, port, nil
+}
+
+func publicKeyFingerprint(publicKey string) (string, error) {
+	parts := strings.Fields(publicKey)
+	if len(parts) < 2 {
+		return "", errors.New("bad public key")
+	}
+	raw, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return "SHA256:" + strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "="), nil
+}
+
+func validTargetName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '_' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
 }
 
 func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {

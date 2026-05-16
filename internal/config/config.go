@@ -121,6 +121,45 @@ func LoadHostDB(c *Config) error {
 	return nil
 }
 
+func SaveHostDB(c *Config) error {
+	if c.HostDB == "" {
+		return fmt.Errorf("host_db is empty")
+	}
+	dir := filepath.Dir(c.HostDB)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	db := HostDB{Hosts: c.Targets}
+	data, err := json.MarshalIndent(db, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".hosts-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if _, err := tmp.WriteString("\n"); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, c.HostDB)
+}
+
 func MaxTTL(c *Config) time.Duration {
 	d, err := time.ParseDuration(c.MaxUnlockTTL)
 	if err != nil || d <= 0 {
