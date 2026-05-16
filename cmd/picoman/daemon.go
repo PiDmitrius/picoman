@@ -72,6 +72,7 @@ func runDaemon() {
 	go out.Run(outboxCtx)
 	audit := newAuditState(cfg.LogLevel)
 	go runControl(ctx, cfg, st, out, bot, audit)
+	go watchUnlockExpiry(ctx, st, out, cfg, bot)
 
 	if autoUnsealed {
 		notifyUsers(out, cfg, bot, unsealText())
@@ -163,6 +164,39 @@ func flushOutbox(out *outbox.Store) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out.Flush(ctx)
+}
+
+func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, cfg *config.Config, bot *tg.Client) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var activeUntil time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		until := st.Until()
+		if until.IsZero() {
+			activeUntil = time.Time{}
+			continue
+		}
+		if time.Now().Before(until) {
+			activeUntil = until
+			continue
+		}
+		if activeUntil.IsZero() || !activeUntil.Equal(until) {
+			continue
+		}
+		if err := st.Lock(); err != nil {
+			notifyUsers(out, cfg, bot, errorText("lock failed: "+err.Error()))
+		} else {
+			notifyUsers(out, cfg, bot, "🔒 locked")
+		}
+		activeUntil = time.Time{}
+	}
 }
 
 func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
