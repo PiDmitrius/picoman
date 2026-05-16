@@ -168,7 +168,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	case "start", "help":
 		reply = infoText(botHelpText())
 	case "status":
-		reply = infoText(st.Status())
+		reply = infoText(statusText(st))
 	case "unlock":
 		reply, err = handleUnlock(fields, st)
 	case "lock":
@@ -233,7 +233,37 @@ func handleUnlock(fields []string, st *agent.State) (string, error) {
 	if err := st.Unlock(ttl); err != nil {
 		return "", err
 	}
-	return successText("🔓 unlocked until " + st.Until().Local().Format(time.RFC3339)), nil
+	return successText("🔓 unlocked (" + leftText(st.Until()) + ")"), nil
+}
+
+func statusText(st *agent.State) string {
+	var lines []string
+	lines = append(lines, "picoman "+version)
+	if st.Sealed() {
+		lines = append(lines, "❌ sealed")
+	} else {
+		lines = append(lines, "✅ unsealed")
+	}
+	if st.IsStarted() {
+		lines = append(lines, "✅ socket")
+	} else {
+		lines = append(lines, "❌ socket")
+	}
+	if st.IsUnlocked() {
+		lines = append(lines, "✅ 🔓 unlocked ("+leftText(st.Until())+")")
+	} else {
+		lines = append(lines, "✅ 🔒 locked")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func leftText(until time.Time) string {
+	left := time.Until(until)
+	if left <= 0 {
+		return "0m left"
+	}
+	minutes := int((left + time.Minute - time.Nanosecond) / time.Minute)
+	return fmt.Sprintf("%dm left", minutes)
 }
 
 func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {

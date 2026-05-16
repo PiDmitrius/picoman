@@ -196,33 +196,16 @@ func (s *State) Lock() error {
 	return nil
 }
 
-func (s *State) Status() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.pid == 0 {
-		return "seal: " + s.sealText() + "\nagent: stopped\nkey: locked"
-	}
-
-	state := "locked"
-	if time.Now().Before(s.until) {
-		state = "unlocked until " + s.until.Local().Format(time.RFC3339)
-	}
-
-	return fmt.Sprintf("seal: %s\nagent: pid=%d socket=%s\nkey: %s", s.sealText(), s.pid, s.socket, state)
-}
-
-func (s *State) sealText() string {
-	if s.passphrase == "" {
-		return "sealed"
-	}
-	return "unsealed"
-}
-
 func (s *State) IsUnlocked() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pid != 0 && time.Now().Before(s.until)
+}
+
+func (s *State) IsStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pid != 0
 }
 
 func (s *State) Until() time.Time {

@@ -89,7 +89,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("🔓 picoman "+version+" unlocked until "+st.Until().Local().Format(time.RFC3339)))
+		notifyUsers(out, cfg, bot, successText("🔓 picoman "+version+" unlocked ("+leftText(st.Until())+")"))
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "LOCK":
 		if err := st.Lock(); err != nil {
