@@ -212,8 +212,22 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		}
 	case "get":
 		reply, err = handleGet(ctx, cfg, st, fields)
+		if err == nil {
+			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
+				log.Printf("enqueue reply: %v", enqueueErr)
+				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
+			}
+			return
+		}
 	case "put":
 		reply, err = handlePut(ctx, cfg, st, fields)
+		if err == nil {
+			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
+				log.Printf("enqueue reply: %v", enqueueErr)
+				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
+			}
+			return
+		}
 	default:
 		reply = warningText("unknown command\n\n" + botHelpText())
 	}
@@ -514,7 +528,7 @@ func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
 		return "", err
 	}
-	return successText("get " + fields[1] + " " + fields[2] + " -> " + localName), nil
+	return transferText("get", fields[1], fields[2], localName), nil
 }
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -528,7 +542,7 @@ func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
 		return "", err
 	}
-	return successText("put " + fields[1] + " " + fields[2] + " -> " + remoteName), nil
+	return transferText("put", fields[1], fields[2], remoteName), nil
 }
 
 func defaultTransferName(name string) string {
@@ -786,7 +800,16 @@ func warningText(s string) string { return "⚠️ " + s }
 func infoText(s string) string    { return "ℹ️ " + s }
 
 func runText(target, command, output string) string {
-	return "✅ " + html.EscapeString(target) +
+	return "✅ <b>" + html.EscapeString(target) + "</b>" +
 		"\n<pre><code>" + html.EscapeString(command) + "</code></pre>" +
 		"\n<pre><code>" + html.EscapeString(output) + "</code></pre>"
+}
+
+func transferText(op, target, source, destination string) string {
+	text := "✅ " + html.EscapeString(op) + " <b>" + html.EscapeString(target) + "</b>" +
+		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
+	if destination != source {
+		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"
+	}
+	return text
 }

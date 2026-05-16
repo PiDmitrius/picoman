@@ -152,7 +152,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("picoman "+version+" get "+parts[0]+" ok"))
+		notifyUsersHTML(out, cfg, bot, transferText("picoman "+version+" get", parts[0], string(remoteName), string(localName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "PUT "):
 		parts := strings.Split(strings.TrimPrefix(line, "PUT "), " ")
@@ -176,7 +176,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("picoman "+version+" put "+parts[0]+" ok"))
+		notifyUsersHTML(out, cfg, bot, transferText("picoman "+version+" put", parts[0], string(localName), string(remoteName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	default:
 		_, _ = io.WriteString(conn, "ERR unknown command\n")
