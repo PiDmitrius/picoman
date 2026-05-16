@@ -55,8 +55,10 @@ func runDaemon() {
 
 	st := agent.New(cfg.AgentSocket, cfg.KeyPath, config.MaxTTL(cfg))
 	cleanup := st.CleanStart()
+	autoUnsealed := false
 	if cfg.KeyPassphrase != "" {
 		st.Unseal(cfg.KeyPassphrase)
+		autoUnsealed = true
 	}
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
@@ -71,6 +73,9 @@ func runDaemon() {
 	audit := newAuditState(cfg.LogLevel)
 	go runControl(ctx, cfg, st, out, bot, audit)
 
+	if autoUnsealed {
+		notifyUsers(out, cfg, bot, successText("unsealed from config"))
+	}
 	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
 
 	offset := int64(0)
