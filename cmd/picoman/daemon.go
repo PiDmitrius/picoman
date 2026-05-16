@@ -348,7 +348,7 @@ func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
 		return "", errors.New("empty public key")
 	}
 	if name == "" {
-		name = "HOST_NAME"
+		name = "HOSTNAME"
 	}
 	return strings.Join([]string{
 		"pub=" + shellQuote(pub) + " && \\",
