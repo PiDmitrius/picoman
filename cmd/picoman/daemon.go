@@ -297,7 +297,7 @@ func hostsText(cfg *config.Config) string {
 
 func handleHost(fields []string, cfg *config.Config) (string, error) {
 	if len(fields) == 2 && fields[1] == "add" {
-		line, err := hostBootstrapLine(cfg)
+		line, err := hostBootstrapLine(cfg, "")
 		if err != nil {
 			return "", err
 		}
@@ -311,8 +311,11 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 		return infoText(hostText(fields[1], target)), nil
 	}
 	if len(fields) >= 3 && fields[1] == "add" {
-		if len(fields) == 3 && fields[2] == "shell" {
-			line, err := hostBootstrapLine(cfg)
+		if len(fields) == 3 {
+			if !validTargetName(fields[2]) {
+				return "", fmt.Errorf("bad host name %q", fields[2])
+			}
+			line, err := hostBootstrapLine(cfg, fields[2])
 			if err != nil {
 				return "", err
 			}
@@ -335,7 +338,7 @@ func hostText(name string, target config.Target) string {
 	return fmt.Sprintf("%s\n%s@%s:%d%s", name, target.User, target.Host, port, state)
 }
 
-func hostBootstrapLine(cfg *config.Config) (string, error) {
+func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
 	data, err := os.ReadFile(cfg.KeyPath + ".pub")
 	if err != nil {
 		return "", err
@@ -343,6 +346,9 @@ func hostBootstrapLine(cfg *config.Config) (string, error) {
 	pub := strings.TrimSpace(string(data))
 	if pub == "" {
 		return "", errors.New("empty public key")
+	}
+	if name == "" {
+		name = "HOST_NAME"
 	}
 	return strings.Join([]string{
 		"pub=" + shellQuote(pub) + " && \\",
@@ -359,7 +365,7 @@ func hostBootstrapLine(cfg *config.Config) (string, error) {
 		"([ -r \"$key_file\" ] || { echo 'SSH host public key not found' >&2; exit 1; }) && \\",
 		"key=$(awk '{print $1\" \"$2}' \"$key_file\") && \\",
 		"fingerprint=$(ssh-keygen -lf \"$key_file\" | awk '{print $2}') && \\",
-		"printf '# host key %s\\nhost add HOST_NAME %s@%s:22 %s\\n' \"$fingerprint\" \"$user\" \"$ip\" \"$key\"",
+		"printf '# host key %s\\nhost add " + shellQuote(name) + " %s@%s:22 %s\\n' \"$fingerprint\" \"$user\" \"$ip\" \"$key\"",
 	}, "\n"), nil
 }
 
