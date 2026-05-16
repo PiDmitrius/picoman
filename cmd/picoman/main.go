@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.35"
+const version = "v0.1.36"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -72,7 +72,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  lock        Remove SSH key from daemon-controlled ssh-agent")
 	fmt.Fprintln(os.Stderr, "  run         Run command on a configured target")
 	fmt.Fprintln(os.Stderr, "  get         Copy remote work file into local work directory")
-	fmt.Fprintln(os.Stderr, "  put         Copy local work file into remote work directory")
+	fmt.Fprintln(os.Stderr, "  put         Copy local work file into target work directory")
 	fmt.Fprintln(os.Stderr, "  loglevel    Set audit log level: chat or all")
 	fmt.Fprintln(os.Stderr, "  stop        Stop the service")
 	fmt.Fprintln(os.Stderr, "  restart     Restart the service")

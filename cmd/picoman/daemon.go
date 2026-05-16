@@ -247,7 +247,7 @@ commands:
 /host add
 /run <target> <command>
 /get <target> <remote-file> <local-file>
-/put <local-file> <target> <remote-file>
+/put <target> <local-file> <remote-file>
 `)
 }
 
@@ -515,12 +515,12 @@ func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
 	if len(fields) != 4 {
-		return "", errors.New("usage: put <local-file> <target> <remote-file>")
+		return "", errors.New("usage: put <target> <local-file> <remote-file>")
 	}
-	if err := copyToTarget(ctx, cfg, st, fields[2], fields[1], fields[3]); err != nil {
+	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], fields[3]); err != nil {
 		return "", err
 	}
-	return successText("put " + fields[1] + " -> " + fields[2] + " " + fields[3]), nil
+	return successText("put " + fields[1] + " " + fields[2] + " -> " + fields[3]), nil
 }
 
 func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (string, error) {
