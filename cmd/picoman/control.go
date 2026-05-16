@@ -130,6 +130,54 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			notifyUsers(out, cfg, bot, successText("picoman "+version+" run "+parts[0]+" ok"))
 		}
 		_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(output))+"\n")
+	case strings.HasPrefix(line, "GET "):
+		parts := strings.Split(strings.TrimPrefix(line, "GET "), " ")
+		if len(parts) != 3 {
+			_, _ = io.WriteString(conn, "ERR bad get request\n")
+			return
+		}
+		remoteName, err := base64.StdEncoding.DecodeString(parts[1])
+		if err != nil {
+			_, _ = io.WriteString(conn, "ERR bad remote file\n")
+			return
+		}
+		localName, err := base64.StdEncoding.DecodeString(parts[2])
+		if err != nil {
+			_, _ = io.WriteString(conn, "ERR bad local file\n")
+			return
+		}
+		err = copyFromTarget(context.Background(), cfg, st, parts[0], string(remoteName), string(localName))
+		if err != nil {
+			notifyUsers(out, cfg, bot, errorText("picoman "+version+" get "+parts[0]+" failed: "+err.Error()))
+			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
+			return
+		}
+		notifyUsers(out, cfg, bot, successText("picoman "+version+" get "+parts[0]+" ok"))
+		_, _ = io.WriteString(conn, "OK\n")
+	case strings.HasPrefix(line, "PUT "):
+		parts := strings.Split(strings.TrimPrefix(line, "PUT "), " ")
+		if len(parts) != 3 {
+			_, _ = io.WriteString(conn, "ERR bad put request\n")
+			return
+		}
+		localName, err := base64.StdEncoding.DecodeString(parts[0])
+		if err != nil {
+			_, _ = io.WriteString(conn, "ERR bad local file\n")
+			return
+		}
+		remoteName, err := base64.StdEncoding.DecodeString(parts[2])
+		if err != nil {
+			_, _ = io.WriteString(conn, "ERR bad remote file\n")
+			return
+		}
+		err = copyToTarget(context.Background(), cfg, st, parts[1], string(localName), string(remoteName))
+		if err != nil {
+			notifyUsers(out, cfg, bot, errorText("picoman "+version+" put "+parts[1]+" failed: "+err.Error()))
+			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
+			return
+		}
+		notifyUsers(out, cfg, bot, successText("picoman "+version+" put "+parts[1]+" ok"))
+		_, _ = io.WriteString(conn, "OK\n")
 	default:
 		_, _ = io.WriteString(conn, "ERR unknown command\n")
 	}
@@ -215,6 +263,34 @@ func runLocalRun(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println(string(data))
+}
+
+func runLocalGet(args []string) {
+	if len(args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman get <target> <remote-file> <local-file>")
+		os.Exit(1)
+	}
+	cfg := loadConfigOrExit()
+	resp, err := controlRequest(cfg.ControlSocket, "GET "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(args[2])))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	printControlResponse(resp)
+}
+
+func runLocalPut(args []string) {
+	if len(args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman put <local-file> <target> <remote-file>")
+		os.Exit(1)
+	}
+	cfg := loadConfigOrExit()
+	resp, err := controlRequest(cfg.ControlSocket, "PUT "+base64.StdEncoding.EncodeToString([]byte(args[0]))+" "+args[1]+" "+base64.StdEncoding.EncodeToString([]byte(args[2])))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	printControlResponse(resp)
 }
 
 func runLogLevel(args []string) {

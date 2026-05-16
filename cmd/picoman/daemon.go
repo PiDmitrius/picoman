@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -208,6 +210,10 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 			}
 			return
 		}
+	case "get":
+		reply, err = handleGet(ctx, cfg, st, fields)
+	case "put":
+		reply, err = handlePut(ctx, cfg, st, fields)
 	default:
 		reply = warningText("unknown command\n\n" + botHelpText())
 	}
@@ -240,6 +246,8 @@ commands:
 /host <name>
 /host add
 /run <target> <command>
+/get <target> <remote-file> <local-file>
+/put <local-file> <target> <remote-file>
 `)
 }
 
@@ -464,6 +472,16 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+func remoteShellQuote(s string) string {
+	if s == "~" {
+		return "~"
+	}
+	if strings.HasPrefix(s, "~/") {
+		return "~/" + shellQuote(strings.TrimPrefix(s, "~/"))
+	}
+	return shellQuote(s)
+}
+
 func sortStrings(values []string) {
 	for i := 1; i < len(values); i++ {
 		for j := i; j > 0 && values[j] < values[j-1]; j-- {
@@ -485,22 +503,50 @@ func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	return runText(fields[1], remoteCommand, out), nil
 }
 
+func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+	if len(fields) != 4 {
+		return "", errors.New("usage: get <target> <remote-file> <local-file>")
+	}
+	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], fields[3]); err != nil {
+		return "", err
+	}
+	return successText("get " + fields[1] + " " + fields[2] + " -> " + fields[3]), nil
+}
+
+func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+	if len(fields) != 4 {
+		return "", errors.New("usage: put <local-file> <target> <remote-file>")
+	}
+	if err := copyToTarget(ctx, cfg, st, fields[2], fields[1], fields[3]); err != nil {
+		return "", err
+	}
+	return successText("put " + fields[1] + " -> " + fields[2] + " " + fields[3]), nil
+}
+
 func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (string, error) {
-	t, ok := cfg.Targets[name]
-	if !ok {
-		return "", fmt.Errorf("unknown target %q", name)
-	}
-	if t.Disabled {
-		return "", fmt.Errorf("target %q is disabled", name)
-	}
-	if !st.IsUnlocked() {
-		return "", errors.New("key is locked")
-	}
-	knownHosts, err := writeKnownHosts(cfg)
+	t, knownHosts, err := targetForSSH(cfg, st, name)
 	if err != nil {
 		return "", err
 	}
 	return runSSH(ctx, st.Socket(), t, command, knownHosts)
+}
+
+func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, string, error) {
+	t, ok := cfg.Targets[name]
+	if !ok {
+		return config.Target{}, "", fmt.Errorf("unknown target %q", name)
+	}
+	if t.Disabled {
+		return config.Target{}, "", fmt.Errorf("target %q is disabled", name)
+	}
+	if !st.IsUnlocked() {
+		return config.Target{}, "", errors.New("key is locked")
+	}
+	knownHosts, err := writeKnownHosts(cfg)
+	if err != nil {
+		return config.Target{}, "", err
+	}
+	return t, knownHosts, nil
 }
 
 func writeKnownHosts(cfg *config.Config) (string, error) {
@@ -529,27 +575,123 @@ func writeKnownHosts(cfg *config.Config) (string, error) {
 	return path, nil
 }
 
+func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, targetName, remoteName, localName string) error {
+	t, knownHosts, err := targetForSSH(cfg, st, targetName)
+	if err != nil {
+		return err
+	}
+	localPath, err := localWorkPath(cfg, localName)
+	if err != nil {
+		return err
+	}
+	remotePath, err := remoteWorkPath(cfg, t, remoteName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o700); err != nil {
+		return err
+	}
+	return runSCP(ctx, st.Socket(), t, knownHosts, remoteSpec(t, remotePath), localPath)
+}
+
+func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targetName, localName, remoteName string) error {
+	t, knownHosts, err := targetForSSH(cfg, st, targetName)
+	if err != nil {
+		return err
+	}
+	localPath, err := localWorkPath(cfg, localName)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(localPath); err != nil {
+		return err
+	} else if info.IsDir() {
+		return errors.New("local file is directory")
+	}
+	remotePath, err := remoteWorkPath(cfg, t, remoteName)
+	if err != nil {
+		return err
+	}
+	remoteDir := path.Dir(remotePath)
+	if _, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir), knownHosts); err != nil {
+		return err
+	}
+	return runSCP(ctx, st.Socket(), t, knownHosts, localPath, remoteSpec(t, remotePath))
+}
+
+func localWorkPath(cfg *config.Config, name string) (string, error) {
+	if badWorkName(name) || filepath.IsAbs(name) {
+		return "", errors.New("bad local file")
+	}
+	base, err := filepath.Abs(cfg.WorkDir)
+	if err != nil {
+		return "", err
+	}
+	full := filepath.Join(base, filepath.Clean(name))
+	rel, err := filepath.Rel(base, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("bad local file")
+	}
+	return full, nil
+}
+
+func remoteWorkPath(cfg *config.Config, target config.Target, name string) (string, error) {
+	if badWorkName(name) || strings.HasPrefix(name, "/") {
+		return "", errors.New("bad remote file")
+	}
+	base := cfg.RemoteWorkDir
+	if target.WorkDir != "" {
+		base = target.WorkDir
+	}
+	if base == "" {
+		base = "~/picoman"
+	}
+	if strings.ContainsAny(base, "\r\n") {
+		return "", errors.New("bad remote work dir")
+	}
+	if strings.ContainsAny(base, " \t") {
+		return "", errors.New("remote work dir with spaces is unsupported")
+	}
+	return path.Join(base, path.Clean(name)), nil
+}
+
+func badWorkName(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return true
+	}
+	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return true
+	}
+	return strings.ContainsAny(name, " \t*?[]{}\r\n")
+}
+
+func remoteSpec(t config.Target, remotePath string) string {
+	return t.User + "@" + t.Host + ":" + remotePath
+}
+
+func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts string, from string, to string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	args := scpArgs(t, knownHosts)
+	args = append(args, from, to)
+	cmd := exec.CommandContext(ctx, "scp", args...)
+	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSocket)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("scp: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	port := t.Port
-	if port == 0 {
-		port = 22
-	}
-	args := []string{
-		"-o", "BatchMode=yes",
-		"-o", "IdentitiesOnly=no",
-		"-p", fmt.Sprint(port),
-	}
-	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
-		args = append(args,
-			"-o", "UserKnownHostsFile="+knownHosts,
-			"-o", "StrictHostKeyChecking=yes",
-		)
-	} else {
-		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
-	}
+	args := sshArgs(t, knownHosts)
 	args = append(args,
 		t.User+"@"+t.Host,
 		remoteCommand,
@@ -582,6 +724,47 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 		return "ok", nil
 	}
 	return out, nil
+}
+
+func sshArgs(t config.Target, knownHosts string) []string {
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=no",
+		"-p", fmt.Sprint(targetPort(t)),
+	}
+	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+knownHosts,
+			"-o", "StrictHostKeyChecking=yes",
+		)
+	} else {
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+	}
+	return args
+}
+
+func scpArgs(t config.Target, knownHosts string) []string {
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=no",
+		"-P", fmt.Sprint(targetPort(t)),
+	}
+	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+knownHosts,
+			"-o", "StrictHostKeyChecking=yes",
+		)
+	} else {
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+	}
+	return args
+}
+
+func targetPort(t config.Target) int {
+	if t.Port == 0 {
+		return 22
+	}
+	return t.Port
 }
 
 func successText(s string) string { return "✅ " + s }
