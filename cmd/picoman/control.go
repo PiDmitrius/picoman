@@ -89,7 +89,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("🔓 picoman "+version+" unlocked ("+leftText(st.Until())+")"))
+		notifyUsers(out, cfg, bot, "🟡 picoman "+version+" unlocked ("+leftText(st.Until())+")")
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "LOCK":
 		if err := st.Lock(); err != nil {
@@ -97,7 +97,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("🔒 picoman "+version+" locked"))
+		notifyUsers(out, cfg, bot, "🔒 picoman "+version+" locked")
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "LOGLEVEL "):
 		level := strings.TrimPrefix(line, "LOGLEVEL ")

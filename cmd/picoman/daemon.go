@@ -174,7 +174,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	case "lock":
 		err = st.Lock()
 		if err == nil {
-			reply = successText("🔒 locked")
+			reply = "🔒 locked"
 		}
 	case "run":
 		reply, err = handleRun(ctx, cfg, st, fields)
@@ -233,7 +233,7 @@ func handleUnlock(fields []string, st *agent.State) (string, error) {
 	if err := st.Unlock(ttl); err != nil {
 		return "", err
 	}
-	return successText("🔓 unlocked (" + leftText(st.Until()) + ")"), nil
+	return "🟡 unlocked (" + leftText(st.Until()) + ")", nil
 }
 
 func statusText(st *agent.State) string {
@@ -250,9 +250,9 @@ func statusText(st *agent.State) string {
 		lines = append(lines, "❌ socket")
 	}
 	if st.IsUnlocked() {
-		lines = append(lines, "✅ 🔓 unlocked ("+leftText(st.Until())+")")
+		lines = append(lines, "🟡 unlocked ("+leftText(st.Until())+")")
 	} else {
-		lines = append(lines, "✅ 🔒 locked")
+		lines = append(lines, "🔒 locked")
 	}
 	return strings.Join(lines, "\n")
 }
