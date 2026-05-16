@@ -354,9 +354,12 @@ func hostBootstrapLine(cfg *config.Config) (string, error) {
 		"ip=$(hostname -I 2>/dev/null | awk '{print $1}') && \\",
 		"([ -n \"$ip\" ] || { echo 'IPv4 address not found' >&2; exit 1; }) && \\",
 		"user=$(id -un) && \\",
-		"key=$(ssh-keyscan -t ed25519 -p 22 \"$ip\" 2>/dev/null | awk '($2 ~ /^(ssh|ecdsa)-/) && $3 {print $2\" \"$3; exit}') && \\",
-		"([ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; }) && \\",
-		"printf 'host add HOST_NAME %s@%s:22 %s\\n' \"$user\" \"$ip\" \"$key\"",
+		"key_file=/etc/ssh/ssh_host_ed25519_key.pub && \\",
+		"([ -r \"$key_file\" ] || key_file=$(ls /etc/ssh/ssh_host_*_key.pub 2>/dev/null | head -n 1)) && \\",
+		"([ -r \"$key_file\" ] || { echo 'SSH host public key not found' >&2; exit 1; }) && \\",
+		"key=$(awk '{print $1\" \"$2}' \"$key_file\") && \\",
+		"fingerprint=$(ssh-keygen -lf \"$key_file\" | awk '{print $2}') && \\",
+		"printf '# host key %s\\nhost add HOST_NAME %s@%s:22 %s\\n' \"$fingerprint\" \"$user\" \"$ip\" \"$key\"",
 	}, "\n"), nil
 }
 
