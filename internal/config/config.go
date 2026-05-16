@@ -2,14 +2,24 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
 type Target struct {
-	User string `json:"user"`
-	Host string `json:"host"`
+	User      string `json:"user"`
+	Host      string `json:"host"`
+	Port      int    `json:"port,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
+	Disabled  bool   `json:"disabled,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+type HostDB struct {
+	Hosts map[string]Target `json:"hosts"`
 }
 
 type Config struct {
@@ -21,6 +31,7 @@ type Config struct {
 	ControlSocket string            `json:"control_socket"`
 	MaxUnlockTTL  string            `json:"max_unlock_ttl"`
 	SourceDir     string            `json:"source_dir"`
+	HostDB        string            `json:"host_db"`
 	Targets       map[string]Target `json:"targets"`
 }
 
@@ -44,11 +55,16 @@ func DBPath() string {
 	return filepath.Join(DataDir(), "picoman.sqlite")
 }
 
+func KnownHostsPath() string {
+	return filepath.Join(DataDir(), "known_hosts")
+}
+
 func Default() *Config {
 	return &Config{
 		AgentSocket:   filepath.Join(DataDir(), "agent.sock"),
 		ControlSocket: filepath.Join(DataDir(), "control.sock"),
 		MaxUnlockTTL:  "15m",
+		HostDB:        filepath.Join(Dir(), "hosts.json"),
 		Targets:       map[string]Target{},
 	}
 }
@@ -76,6 +92,33 @@ func Save(c *Config) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600)
+}
+
+func LoadHostDB(c *Config) error {
+	if c.HostDB == "" {
+		return nil
+	}
+	data, err := os.ReadFile(c.HostDB)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var db HostDB
+	if err := json.Unmarshal(data, &db); err != nil {
+		return err
+	}
+	if db.Hosts == nil {
+		db.Hosts = map[string]Target{}
+	}
+	for name, target := range db.Hosts {
+		if err := validateTarget(name, target); err != nil {
+			return err
+		}
+	}
+	c.Targets = db.Hosts
+	return nil
 }
 
 func MaxTTL(c *Config) time.Duration {
@@ -108,6 +151,9 @@ func normalize(c *Config) *Config {
 	if c.MaxUnlockTTL == "" {
 		c.MaxUnlockTTL = def.MaxUnlockTTL
 	}
+	if c.HostDB == "" {
+		c.HostDB = def.HostDB
+	}
 	if c.Targets == nil {
 		c.Targets = map[string]Target{}
 	}
@@ -115,4 +161,22 @@ func normalize(c *Config) *Config {
 		c.AllowedUsers = []int64{}
 	}
 	return c
+}
+
+var targetNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
+func validateTarget(name string, target Target) error {
+	if !targetNameRe.MatchString(name) {
+		return fmt.Errorf("bad target name %q", name)
+	}
+	if target.User == "" {
+		return fmt.Errorf("target %q user is empty", name)
+	}
+	if target.Host == "" {
+		return fmt.Errorf("target %q host is empty", name)
+	}
+	if target.Port < 0 || target.Port > 65535 {
+		return fmt.Errorf("target %q port is invalid", name)
+	}
+	return nil
 }

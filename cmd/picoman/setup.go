@@ -35,6 +35,7 @@ func runSetup() {
 	cfg.ControlSocket = expandPathValue(promptStringKeep(reader, "Control socket", displayPathValue(cfg.ControlSocket)), "")
 	cfg.MaxUnlockTTL = promptDurationKeep(reader, "Max unlock TTL", cfg.MaxUnlockTTL)
 	cfg.SourceDir = expandPathValue(promptStringKeep(reader, "Source directory", displayPathValue(defaultSourceDir(cfg.SourceDir))), "")
+	cfg.HostDB = expandPathValue(promptStringKeep(reader, "Host database", displayPathValue(cfg.HostDB)), "")
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

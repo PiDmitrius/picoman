@@ -31,6 +31,11 @@ func runDaemon() {
 	if len(cfg.AllowedUsers) == 0 {
 		log.Fatal("tg_allowed_users is required; run picoman setup")
 	}
+	bot := tg.New(cfg.TelegramToken)
+	if err := config.LoadHostDB(cfg); err != nil {
+		criticalNotifyUsers(cfg, bot, "hostdb", err)
+		log.Fatalf("load host db: %v", err)
+	}
 
 	writePID()
 	defer removePID()
@@ -43,7 +48,6 @@ func runDaemon() {
 	if cfg.KeyPassphrase != "" {
 		st.Unseal(cfg.KeyPassphrase)
 	}
-	bot := tg.New(cfg.TelegramToken)
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
 		criticalNotifyUsers(cfg, bot, "outbox", err)
@@ -279,23 +283,70 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 	if !ok {
 		return "", fmt.Errorf("unknown target %q", name)
 	}
+	if t.Disabled {
+		return "", fmt.Errorf("target %q is disabled", name)
+	}
 	if !st.IsUnlocked() {
 		return "", errors.New("key is locked")
 	}
-	return runSSH(ctx, st.Socket(), t, command)
+	knownHosts, err := writeKnownHosts(cfg)
+	if err != nil {
+		return "", err
+	}
+	return runSSH(ctx, st.Socket(), t, command, knownHosts)
 }
 
-func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string) (string, error) {
+func writeKnownHosts(cfg *config.Config) (string, error) {
+	var lines []string
+	for _, target := range cfg.Targets {
+		key := strings.TrimSpace(target.PublicKey)
+		if key == "" || target.Disabled {
+			continue
+		}
+		host := target.Host
+		if target.Port != 0 && target.Port != 22 {
+			host = fmt.Sprintf("[%s]:%d", target.Host, target.Port)
+		}
+		lines = append(lines, host+" "+key)
+	}
+	if len(lines) == 0 {
+		return "", nil
+	}
+	if err := os.MkdirAll(config.DataDir(), 0o700); err != nil {
+		return "", err
+	}
+	path := config.KnownHostsPath()
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	port := t.Port
+	if port == 0 {
+		port = 22
+	}
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=no",
-		"-o", "StrictHostKeyChecking=accept-new",
-		t.User + "@" + t.Host,
-		remoteCommand,
+		"-p", fmt.Sprint(port),
 	}
+	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
+		args = append(args,
+			"-o", "UserKnownHostsFile="+knownHosts,
+			"-o", "StrictHostKeyChecking=yes",
+		)
+	} else {
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+	}
+	args = append(args,
+		t.User+"@"+t.Host,
+		remoteCommand,
+	)
 
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSocket)
