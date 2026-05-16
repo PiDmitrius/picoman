@@ -296,6 +296,13 @@ func hostsText(cfg *config.Config) string {
 }
 
 func handleHost(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) == 2 && fields[1] == "add" {
+		line, err := hostBootstrapLine(cfg)
+		if err != nil {
+			return "", err
+		}
+		return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
+	}
 	if len(fields) == 2 {
 		target, ok := cfg.Targets[fields[1]]
 		if !ok {
@@ -312,13 +319,6 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 			return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
 		}
 		return addHostFromFields(fields[2:], cfg)
-	}
-	if len(fields) == 2 && fields[1] == "add" {
-		line, err := hostBootstrapLine(cfg)
-		if err != nil {
-			return "", err
-		}
-		return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
 	}
 	return "", errors.New("usage: host <name> | host add | host add <name> <user>@<host>:<port> <keytype> <key>")
 }
