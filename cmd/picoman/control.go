@@ -64,7 +64,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		st.Unseal(string(data))
-		notifyUsers(out, cfg, bot, successText("picoman "+version+" unsealed"))
+		notifyUsers(out, cfg, bot, unsealText())
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
 		st.Seal()

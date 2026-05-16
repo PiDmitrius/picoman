@@ -74,7 +74,7 @@ func runDaemon() {
 	go runControl(ctx, cfg, st, out, bot, audit)
 
 	if autoUnsealed {
-		notifyUsers(out, cfg, bot, successText("unsealed from config"))
+		notifyUsers(out, cfg, bot, unsealText())
 	}
 	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
 
@@ -803,6 +803,7 @@ func successText(s string) string { return "✅ " + s }
 func errorText(s string) string   { return "❌ " + s }
 func warningText(s string) string { return "⚠️ " + s }
 func infoText(s string) string    { return "ℹ️ " + s }
+func unsealText() string          { return "🟡 unsealed" }
 
 func runText(target, command, output string) string {
 	return actionText("▶️ run", target) +
