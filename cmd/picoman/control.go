@@ -120,7 +120,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		output, err := runTarget(context.Background(), cfg, st, parts[0], string(command))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("run "+parts[0]+" failed: "+err.Error()))
+			notifyUsersHTML(out, cfg, bot, runErrorText(parts[0], string(command), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
@@ -148,7 +148,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyFromTarget(context.Background(), cfg, st, parts[0], string(remoteName), string(localName))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("get "+parts[0]+" failed: "+err.Error()))
+			notifyUsersHTML(out, cfg, bot, transferErrorText("⬅️ get", parts[0], string(remoteName), string(localName), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
@@ -172,7 +172,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyToTarget(context.Background(), cfg, st, parts[0], string(localName), string(remoteName))
 		if err != nil {
-			notifyUsers(out, cfg, bot, errorText("put "+parts[0]+" failed: "+err.Error()))
+			notifyUsersHTML(out, cfg, bot, transferErrorText("➡️ put", parts[0], string(localName), string(remoteName), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}

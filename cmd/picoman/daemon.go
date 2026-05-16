@@ -845,12 +845,30 @@ func runText(target, command, output string) string {
 		"\n<pre><code>" + html.EscapeString(output) + "</code></pre>"
 }
 
+func runErrorText(target, command, reason string) string {
+	return actionErrorText("▶️ run", target, reason) +
+		"\n<pre><code>" + html.EscapeString(command) + "</code></pre>"
+}
+
 func actionText(action, target string) string {
 	return html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
 }
 
+func actionErrorText(action, target, reason string) string {
+	return "❌ " + actionText(action, target) + " (" + html.EscapeString(reason) + ")"
+}
+
 func transferText(op, target, source, destination string) string {
 	text := actionText(op, target) +
+		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
+	if destination != source {
+		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"
+	}
+	return text
+}
+
+func transferErrorText(op, target, source, destination, reason string) string {
+	text := actionErrorText(op, target, reason) +
 		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
 	if destination != source {
 		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"
