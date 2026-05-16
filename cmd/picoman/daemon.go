@@ -216,6 +216,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 
 	var reply string
 	var err error
+	replyHTML := false
 
 	switch commandName(fields[0]) {
 	case "start", "help":
@@ -224,14 +225,14 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		reply = infoText(statusText(st))
 	case "hosts":
 		reply = infoText(hostsText(cfg))
+		replyHTML = true
 	case "host":
 		reply, err = handleHost(fields, cfg)
-		if err == nil && strings.HasPrefix(reply, "<pre><code>") {
-			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
-				log.Printf("enqueue reply: %v", enqueueErr)
-				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-			}
-			return
+		if err == nil {
+			replyHTML = true
+		} else if len(fields) == 2 && fields[1] != "add" {
+			reply = "❌ unknown host " + hostNameText(fields[1])
+			replyHTML = true
 		}
 	case "unlock":
 		reply, err = handleUnlock(fields, st)
@@ -249,6 +250,10 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 			}
 			return
 		}
+		if len(fields) >= 3 {
+			reply = runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error())
+			replyHTML = true
+		}
 	case "get":
 		reply, err = handleGet(ctx, cfg, st, fields)
 		if err == nil {
@@ -257,6 +262,14 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
 			}
 			return
+		}
+		if len(fields) >= 3 {
+			localName := defaultTransferName(fields[2])
+			if len(fields) >= 4 {
+				localName = fields[3]
+			}
+			reply = transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error())
+			replyHTML = true
 		}
 	case "put":
 		reply, err = handlePut(ctx, cfg, st, fields)
@@ -267,20 +280,36 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 			}
 			return
 		}
+		if len(fields) >= 3 {
+			remoteName := defaultTransferName(fields[2])
+			if len(fields) >= 4 {
+				remoteName = fields[3]
+			}
+			reply = transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error())
+			replyHTML = true
+		}
 	default:
 		reply = warningText("unknown command\n\n" + botHelpText())
 	}
 
 	if err != nil {
-		reply = errorText(err.Error())
+		if reply == "" {
+			reply = errorText(err.Error())
+		}
 		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, text, err)
 	} else {
 		log.Printf("command ok user=%d command=%q", msg.From.ID, text)
 	}
 
-	if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, reply); err != nil {
-		log.Printf("enqueue reply: %v", err)
-		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
+	var enqueueErr error
+	if replyHTML {
+		enqueueErr = out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply)
+	} else {
+		enqueueErr = out.EnqueueReply(msg.Chat.ID, msg.MessageID, reply)
+	}
+	if enqueueErr != nil {
+		log.Printf("enqueue reply: %v", enqueueErr)
+		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
 	}
 }
 
@@ -354,7 +383,7 @@ func hostsText(cfg *config.Config) string {
 	}
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
-		names = append(names, name)
+		names = append(names, hostNameText(name))
 	}
 	sortStrings(names)
 	return "hosts\n" + strings.Join(names, "\n")
@@ -400,7 +429,13 @@ func hostText(name string, target config.Target) string {
 	if target.Disabled {
 		state = "\ndisabled"
 	}
-	return fmt.Sprintf("%s\n%s@%s:%d%s", name, target.User, target.Host, port, state)
+	return fmt.Sprintf("%s\n%s@%s:%d%s",
+		hostNameText(name),
+		html.EscapeString(target.User),
+		html.EscapeString(target.Host),
+		port,
+		state,
+	)
 }
 
 func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
@@ -463,7 +498,18 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		return "", err
 	}
 	fp, _ := publicKeyFingerprint(publicKey)
-	return successText("host added\n" + name + "\n" + fmt.Sprintf("%s@%s:%d\n%s", user, host, port, fp)), nil
+	return successText("host added\n" +
+		hostNameText(name) + "\n" +
+		fmt.Sprintf("%s@%s:%d\n%s",
+			html.EscapeString(user),
+			html.EscapeString(host),
+			port,
+			html.EscapeString(fp),
+		)), nil
+}
+
+func hostNameText(name string) string {
+	return "<b>" + html.EscapeString(name) + "</b>"
 }
 
 func parseTargetAddress(value string) (string, string, int, error) {
