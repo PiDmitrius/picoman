@@ -105,7 +105,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR bad loglevel\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, successText("loglevel "+level))
+		notifyUsers(out, cfg, bot, "⚙️ loglevel "+level)
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "RUN "):
 		parts := strings.SplitN(strings.TrimPrefix(line, "RUN "), " ", 2)
