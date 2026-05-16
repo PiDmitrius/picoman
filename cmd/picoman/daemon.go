@@ -345,19 +345,19 @@ func hostBootstrapLine(cfg *config.Config) (string, error) {
 		return "", errors.New("empty public key")
 	}
 	return strings.Join([]string{
-		"pub=" + shellQuote(pub) + ";",
-		"mkdir -p ~/.ssh;",
-		"chmod 700 ~/.ssh;",
-		"touch ~/.ssh/authorized_keys;",
-		"grep -qxF \"$pub\" ~/.ssh/authorized_keys || printf '%s\\n' \"$pub\" >> ~/.ssh/authorized_keys;",
-		"chmod 600 ~/.ssh/authorized_keys;",
-		"host=$(hostname -I 2>/dev/null | awk '{print $1}');",
-		"[ -n \"$host\" ] || host=$(hostname -f);",
-		"user=$(id -un);",
-		"key=$(ssh-keyscan -t ed25519 -p 22 \"$host\" 2>/dev/null | awk 'NF>=3{print $2\" \"$3; exit}');",
-		"[ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; };",
+		"pub=" + shellQuote(pub) + " && \\",
+		"mkdir -p ~/.ssh && \\",
+		"chmod 700 ~/.ssh && \\",
+		"touch ~/.ssh/authorized_keys && \\",
+		"(grep -qxF \"$pub\" ~/.ssh/authorized_keys || printf '%s\\n' \"$pub\" >> ~/.ssh/authorized_keys) && \\",
+		"chmod 600 ~/.ssh/authorized_keys && \\",
+		"host=$(hostname -I 2>/dev/null | awk '{print $1}') && \\",
+		"([ -n \"$host\" ] || host=$(hostname -f)) && \\",
+		"user=$(id -un) && \\",
+		"key=$(ssh-keyscan -t ed25519 -p 22 \"$host\" 2>/dev/null | awk 'NF>=3{print $2\" \"$3; exit}') && \\",
+		"([ -n \"$key\" ] || { echo 'ssh-keyscan failed' >&2; exit 1; }) && \\",
 		"printf 'host add NAME %s@%s:22 %s\\n' \"$user\" \"$host\" \"$key\"",
-	}, " "), nil
+	}, "\n"), nil
 }
 
 func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
