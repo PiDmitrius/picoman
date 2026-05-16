@@ -38,12 +38,23 @@ func runSetup() {
 	cfg.HostDB = expandPathValue(promptStringKeep(reader, "Host database", displayPathValue(cfg.HostDB)), "")
 	cfg.WorkDir = expandPathValue(promptStringKeep(reader, "Local work directory", displayPathValue(cfg.WorkDir)), "")
 	cfg.RemoteWorkDir = promptStringKeep(reader, "Remote work directory", cfg.RemoteWorkDir)
+	cfg.LogLevel = promptLogLevelKeep(reader, "Log level", cfg.LogLevel)
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Saved to %s\n", filepath.Join(config.Dir(), "config.json"))
+}
+
+func promptLogLevelKeep(reader *bufio.Reader, label, current string) string {
+	for {
+		line := promptStringKeep(reader, label, current)
+		if line == "" || line == "chat" || line == "all" {
+			return line
+		}
+		fmt.Println("Invalid log level, use chat or all")
+	}
 }
 
 func maskToken(s string) string {

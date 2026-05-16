@@ -35,6 +35,7 @@ type Config struct {
 	HostDB        string            `json:"host_db"`
 	WorkDir       string            `json:"work_dir"`
 	RemoteWorkDir string            `json:"remote_work_dir"`
+	LogLevel      string            `json:"loglevel"`
 	Targets       map[string]Target `json:"targets"`
 }
 
@@ -71,6 +72,7 @@ func Default() *Config {
 		HostDB:        filepath.Join(Dir(), "hosts.json"),
 		WorkDir:       filepath.Join(home, "picoman"),
 		RemoteWorkDir: "~/picoman",
+		LogLevel:      "chat",
 		Targets:       map[string]Target{},
 	}
 }
@@ -204,6 +206,9 @@ func normalize(c *Config) *Config {
 	}
 	if c.RemoteWorkDir == "" {
 		c.RemoteWorkDir = def.RemoteWorkDir
+	}
+	if c.LogLevel != "all" {
+		c.LogLevel = def.LogLevel
 	}
 	if c.Targets == nil {
 		c.Targets = map[string]Target{}

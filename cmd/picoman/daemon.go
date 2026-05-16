@@ -68,7 +68,7 @@ func runDaemon() {
 	outboxCtx, stopOutbox := context.WithCancel(context.Background())
 	defer stopOutbox()
 	go out.Run(outboxCtx)
-	audit := newAuditState()
+	audit := newAuditState(cfg.LogLevel)
 	go runControl(ctx, cfg, st, out, bot, audit)
 
 	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
@@ -806,7 +806,7 @@ func runText(target, command, output string) string {
 }
 
 func actionText(action, target string) string {
-	return "✅ " + html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
+	return html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
 }
 
 func transferText(op, target, source, destination string) string {
