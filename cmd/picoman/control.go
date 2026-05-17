@@ -37,11 +37,11 @@ type controlServer struct {
 	audit *auditState
 }
 
-type controlHandler func(ctx context.Context, args [][]byte) ([]byte, error)
+type controlHandler func(ctx context.Context, args [][]byte) ([][]byte, error)
 
 func (s *controlServer) handlers() map[string]controlHandler {
-	bind := func(fn func([][]byte) ([]byte, error)) controlHandler {
-		return func(_ context.Context, a [][]byte) ([]byte, error) { return fn(a) }
+	bind := func(fn func([][]byte) ([][]byte, error)) controlHandler {
+		return func(_ context.Context, a [][]byte) ([][]byte, error) { return fn(a) }
 	}
 	return map[string]controlHandler{
 		"UNSEAL":    bind(s.unseal),
@@ -137,12 +137,16 @@ func parseControlRequest(line string) (string, [][]byte, error) {
 	return verb, args, nil
 }
 
-func writeOK(conn net.Conn, data []byte) {
+func writeOK(conn net.Conn, data [][]byte) {
 	if len(data) == 0 {
 		_, _ = io.WriteString(conn, "OK\n")
 		return
 	}
-	_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString(data)+"\n")
+	parts := make([]string, len(data))
+	for i, d := range data {
+		parts[i] = base64.StdEncoding.EncodeToString(d)
+	}
+	_, _ = io.WriteString(conn, "OK "+strings.Join(parts, " ")+"\n")
 }
 
 func writeErr(conn net.Conn, err error) {
@@ -160,7 +164,7 @@ func handleAskpass(conn net.Conn, st *agent.State) {
 
 // --- handlers ---
 
-func (s *controlServer) unseal(args [][]byte) ([]byte, error) {
+func (s *controlServer) unseal(args [][]byte) ([][]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("usage: UNSEAL <passphrase>")
 	}
@@ -172,7 +176,7 @@ func (s *controlServer) unseal(args [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) seal(_ [][]byte) ([]byte, error) {
+func (s *controlServer) seal(_ [][]byte) ([][]byte, error) {
 	if err := s.st.Lock(); err != nil {
 		notify(s.out, s.cfg, s.bot, false, errorText("seal failed: "+err.Error()))
 		return nil, err
@@ -182,7 +186,7 @@ func (s *controlServer) seal(_ [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) unlock(args [][]byte) ([]byte, error) {
+func (s *controlServer) unlock(args [][]byte) ([][]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("usage: UNLOCK <ttl>")
 	}
@@ -198,7 +202,7 @@ func (s *controlServer) unlock(args [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) lock(_ [][]byte) ([]byte, error) {
+func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
 	if err := s.st.Lock(); err != nil {
 		notify(s.out, s.cfg, s.bot, false, errorText("lock failed: "+err.Error()))
 		return nil, err
@@ -207,7 +211,7 @@ func (s *controlServer) lock(_ [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) loglevel(args [][]byte) ([]byte, error) {
+func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("usage: LOGLEVEL <chat|all>")
 	}
@@ -219,30 +223,35 @@ func (s *controlServer) loglevel(args [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) run(ctx context.Context, args [][]byte) ([]byte, error) {
+func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error) {
 	if len(args) != 2 {
 		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
-	output, err := runTarget(ctx, s.cfg, s.st, host, command)
+	stdout, stderr, err := runTarget(ctx, s.cfg, s.st, host, command)
 	if err != nil {
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
-		// Surface partial output to the CLI via the error reason so the
-		// caller sees more than just "ssh: exit status N".
-		if output != "" {
-			return nil, fmt.Errorf("%s\n%s", err, output)
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, stdout, stderr, err.Error()))
+		// Surface partial stdout/stderr to the CLI by embedding them in the
+		// error reason — protocol stays simple ERR-string while CLI users
+		// see more than just "ssh: exit status N".
+		reason := err.Error()
+		if stdout != "" {
+			reason += "\nstdout:\n" + stdout
 		}
-		return nil, err
+		if stderr != "" {
+			reason += "\nstderr:\n" + stderr
+		}
+		return nil, errors.New(reason)
 	}
 	if s.audit.LogLevel() == "all" {
-		notify(s.out, s.cfg, s.bot, true, runText(host, command, output))
+		notify(s.out, s.cfg, s.bot, true, runText(host, command, stdout, stderr))
 	} else {
 		notify(s.out, s.cfg, s.bot, true, actionText("▶️ run", host))
 	}
-	return []byte(output), nil
+	return [][]byte{[]byte(stdout), []byte(stderr)}, nil
 }
 
-func (s *controlServer) get(ctx context.Context, args [][]byte) ([]byte, error) {
+func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error) {
 	if len(args) != 3 {
 		return nil, errors.New("usage: GET <host> <remote> <local>")
 	}
@@ -255,7 +264,7 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([]byte, error) 
 	return nil, nil
 }
 
-func (s *controlServer) hostAdd(args [][]byte) ([]byte, error) {
+func (s *controlServer) hostAdd(args [][]byte) ([][]byte, error) {
 	if len(args) != 4 {
 		return nil, errors.New("usage: HOST_ADD <name> <user>@<host>:<port> <keytype> <key>")
 	}
@@ -266,7 +275,7 @@ func (s *controlServer) hostAdd(args [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) hostNote(args [][]byte) ([]byte, error) {
+func (s *controlServer) hostNote(args [][]byte) ([][]byte, error) {
 	if len(args) < 1 {
 		return nil, errors.New("usage: HOST_NOTE <name> [note]")
 	}
@@ -281,7 +290,7 @@ func (s *controlServer) hostNote(args [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) put(ctx context.Context, args [][]byte) ([]byte, error) {
+func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error) {
 	if len(args) != 3 {
 		return nil, errors.New("usage: PUT <host> <local> <remote>")
 	}
@@ -329,13 +338,22 @@ func runLocalRun(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
 		os.Exit(1)
 	}
-	data, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
+	parts, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if len(data) > 0 {
-		fmt.Println(string(data))
+	if len(parts) > 0 && len(parts[0]) > 0 {
+		os.Stdout.Write(parts[0])
+		if !strings.HasSuffix(string(parts[0]), "\n") {
+			fmt.Println()
+		}
+	}
+	if len(parts) > 1 && len(parts[1]) > 0 {
+		os.Stderr.Write(parts[1])
+		if !strings.HasSuffix(string(parts[1]), "\n") {
+			fmt.Fprintln(os.Stderr)
+		}
 	}
 }
 
@@ -467,24 +485,27 @@ func runAskpass() {
 	fmt.Print(resp)
 }
 
-// simpleControl runs a verb, prints the response payload (if any), exits non-zero on ERR.
+// simpleControl runs a verb, prints the first response payload (if any) to
+// stdout, exits non-zero on ERR. Multi-payload responses (RUN's stdout/stderr)
+// should be consumed via requestControl directly.
 func simpleControl(verb string, args ...string) {
-	data, err := requestControl(verb, args...)
+	parts, err := requestControl(verb, args...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if len(data) > 0 {
-		os.Stdout.Write(data)
-		if !strings.HasSuffix(string(data), "\n") {
+	if len(parts) > 0 && len(parts[0]) > 0 {
+		os.Stdout.Write(parts[0])
+		if !strings.HasSuffix(string(parts[0]), "\n") {
 			fmt.Println()
 		}
 	}
 }
 
-// requestControl encodes args, sends the request, and decodes the OK payload.
-// Returns the raw payload bytes (possibly empty), or an error from ERR/transport.
-func requestControl(verb string, args ...string) ([]byte, error) {
+// requestControl encodes args, sends the request, and decodes the OK payload
+// into separate parts (one per b64 token after "OK"). Returns nil parts when
+// the response is bare "OK". On ERR or transport failure returns the reason.
+func requestControl(verb string, args ...string) ([][]byte, error) {
 	cfg := loadConfigOrExit()
 	line := verb
 	for _, a := range args {
@@ -499,7 +520,16 @@ func requestControl(verb string, args ...string) ([]byte, error) {
 	case resp == "OK":
 		return nil, nil
 	case strings.HasPrefix(resp, "OK "):
-		return base64.StdEncoding.DecodeString(strings.TrimPrefix(resp, "OK "))
+		tokens := strings.Split(strings.TrimPrefix(resp, "OK "), " ")
+		parts := make([][]byte, 0, len(tokens))
+		for _, t := range tokens {
+			b, decErr := base64.StdEncoding.DecodeString(t)
+			if decErr != nil {
+				return nil, decErr
+			}
+			parts = append(parts, b)
+		}
+		return parts, nil
 	case strings.HasPrefix(resp, "ERR "):
 		return nil, errors.New(strings.TrimPrefix(resp, "ERR "))
 	default:
