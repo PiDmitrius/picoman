@@ -236,6 +236,12 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		}
 	case "unlock":
 		reply, err = handleUnlock(fields, st)
+	case "seal":
+		err = st.Lock()
+		if err == nil {
+			st.Seal()
+			reply = "⚪ sealed"
+		}
 	case "lock":
 		err = st.Lock()
 		if err == nil {
@@ -336,6 +342,7 @@ func botHelpText() string {
 commands:
 /unlock 5m
 /unlock
+/seal
 /lock
 /status
 /hosts

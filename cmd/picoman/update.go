@@ -56,8 +56,19 @@ func runUpdate() {
 	restart.Stdout = os.Stdout
 	restart.Stderr = os.Stderr
 	if err := restart.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "restart failed: %v\n", err)
-		os.Exit(1)
+		reset := exec.Command("systemctl", "--user", "reset-failed", "picoman")
+		reset.Stdout = os.Stdout
+		reset.Stderr = os.Stderr
+		_ = reset.Run()
+
+		start := exec.Command("systemctl", "--user", "start", "picoman")
+		start.Stdout = os.Stdout
+		start.Stderr = os.Stderr
+		if startErr := start.Run(); startErr != nil {
+			fmt.Fprintf(os.Stderr, "restart failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "start after reset-failed failed: %v\n", startErr)
+			os.Exit(1)
+		}
 	}
 }
 

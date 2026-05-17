@@ -67,6 +67,11 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		notifyUsers(out, cfg, bot, unsealText())
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
+		if err := st.Lock(); err != nil {
+			notifyUsers(out, cfg, bot, errorText("seal failed: "+err.Error()))
+			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
+			return
+		}
 		st.Seal()
 		notifyUsers(out, cfg, bot, "⚪ sealed")
 		_, _ = io.WriteString(conn, "OK\n")
