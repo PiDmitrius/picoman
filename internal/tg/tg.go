@@ -108,6 +108,23 @@ func (c *Client) sendMessage(ctx context.Context, values url.Values) error {
 	return c.call(ctx, http.MethodPost, "sendMessage", values, &decoded)
 }
 
+// APIError is a Telegram API error from a non-2xx response.
+// Network and transport errors are returned as-is from c.client.Do and are
+// not wrapped in APIError, so callers can distinguish them with errors.As.
+type APIError struct {
+	Code        int
+	Description string
+	RetryAfter  int
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("telegram %d: %s", e.Code, e.Description)
+}
+
+func (e *APIError) IsRetryable() bool {
+	return e.RetryAfter > 0 || e.Code == 429 || e.Code >= 500
+}
+
 func (c *Client) call(ctx context.Context, method, apiMethod string, values url.Values, out any) error {
 	endpoint := "https://api.telegram.org/bot" + c.token + "/" + apiMethod
 	var body io.Reader
@@ -127,19 +144,48 @@ func (c *Client) call(ctx context.Context, method, apiMethod string, values url.
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return redactToken(err, c.token)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return redactToken(err, c.token)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram status %s: %s", resp.Status, string(data))
+		var decoded struct {
+			ErrorCode  int    `json:"error_code"`
+			Description string `json:"description"`
+			Parameters struct {
+				RetryAfter int `json:"retry_after"`
+			} `json:"parameters"`
+		}
+		_ = json.Unmarshal(data, &decoded)
+		code := decoded.ErrorCode
+		if code == 0 {
+			code = resp.StatusCode
+		}
+		return &APIError{
+			Code:        code,
+			Description: decoded.Description,
+			RetryAfter:  decoded.Parameters.RetryAfter,
+		}
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return err
 	}
 	return nil
+}
+
+// redactToken strips the bot token from net/url errors so it does not leak
+// into logs or persistent stores.
+func redactToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, token) {
+		return err
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(msg, token, "<redacted>"))
 }
