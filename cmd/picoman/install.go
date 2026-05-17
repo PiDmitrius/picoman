@@ -40,7 +40,7 @@ func runInstall() {
 
 	out, _ := exec.Command("systemctl", "--user", "is-active", "picoman").Output()
 	if strings.TrimSpace(string(out)) == "active" {
-		fmt.Println("\nInstalled. Service is running — restart it with: picoman restart")
+		fmt.Println("\nInstalled. Service is running.")
 	} else {
 		fmt.Println("\nInstalled. Run: picoman start")
 	}
@@ -76,6 +76,11 @@ Type=simple
 ExecStart=%s start
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=default.target

@@ -7,8 +7,11 @@ type auditState struct {
 	logLevel string
 }
 
-func newAuditState() *auditState {
-	return &auditState{logLevel: "chat"}
+func newAuditState(level string) *auditState {
+	if level != "all" {
+		level = "chat"
+	}
+	return &auditState{logLevel: level}
 }
 
 func (a *auditState) LogLevel() string {
