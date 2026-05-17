@@ -61,10 +61,37 @@ func (r CleanResult) String() string {
 	return fmt.Sprintf("agent: %s\nsocket: %s\npid_file: %s", r.Agent, r.Socket, r.PIDFile)
 }
 
-func (s *State) Unseal(passphrase string) {
+func (s *State) Unseal(passphrase string) error {
+	if err := s.verifyPassphrase(passphrase); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.passphrase = passphrase
+	return nil
+}
+
+func (s *State) verifyPassphrase(passphrase string) error {
+	if s.keyPath == "" {
+		return fmt.Errorf("key_path is empty")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-y", "-P", passphrase, "-f", s.keyPath)
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		return err
+	}
+	defer devnull.Close()
+	cmd.Stdin = devnull
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("bad passphrase")
+	}
+	return nil
 }
 
 func (s *State) Seal() {
