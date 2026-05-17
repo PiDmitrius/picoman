@@ -121,7 +121,7 @@ func LoadHostDB(c *Config) error {
 		db.Hosts = map[string]Target{}
 	}
 	for name, target := range db.Hosts {
-		if err := validateTarget(name, target); err != nil {
+		if err := ValidateTarget(name, target); err != nil {
 			return err
 		}
 	}
@@ -219,17 +219,23 @@ func normalize(c *Config) *Config {
 	return c
 }
 
-var targetNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+var (
+	targetNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	userRe       = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,31}$`)
+	hostRe       = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,253}$`)
+)
 
-func validateTarget(name string, target Target) error {
+func ValidName(name string) bool { return targetNameRe.MatchString(name) }
+
+func ValidateTarget(name string, target Target) error {
 	if !targetNameRe.MatchString(name) {
 		return fmt.Errorf("bad target name %q", name)
 	}
-	if target.User == "" {
-		return fmt.Errorf("target %q user is empty", name)
+	if !userRe.MatchString(target.User) {
+		return fmt.Errorf("target %q has bad user", name)
 	}
-	if target.Host == "" {
-		return fmt.Errorf("target %q host is empty", name)
+	if !hostRe.MatchString(target.Host) {
+		return fmt.Errorf("target %q has bad host", name)
 	}
 	if target.Port < 0 || target.Port > 65535 {
 		return fmt.Errorf("target %q port is invalid", name)

@@ -469,7 +469,7 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 	}
 	if len(fields) >= 3 && fields[1] == "add" {
 		if len(fields) == 3 {
-			if !validTargetName(fields[2]) {
+			if !config.ValidName(fields[2]) {
 				return "", fmt.Errorf("bad host name %q", fields[2])
 			}
 			line, err := hostBootstrapLine(cfg, fields[2])
@@ -549,9 +549,6 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		return "", errors.New("usage: host add <name> <user>@<host>:<port> <keytype> <key>")
 	}
 	name := fields[0]
-	if !validTargetName(name) {
-		return "", fmt.Errorf("bad host name %q", name)
-	}
 	user, host, port, err := parseTargetAddress(fields[1])
 	if err != nil {
 		return "", err
@@ -564,13 +561,17 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		cfg.Targets = map[string]config.Target{}
 	}
 	existing := cfg.Targets[name]
-	cfg.Targets[name] = config.Target{
+	target := config.Target{
 		User:      user,
 		Host:      host,
 		Port:      port,
 		PublicKey: publicKey,
 		Note:      existing.Note,
 	}
+	if err := config.ValidateTarget(name, target); err != nil {
+		return "", err
+	}
+	cfg.Targets[name] = target
 	if err := config.SaveHostDB(cfg); err != nil {
 		return "", err
 	}
@@ -646,22 +647,6 @@ func publicKeyFingerprint(publicKey string) (string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	return "SHA256:" + strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "="), nil
-}
-
-func validTargetName(name string) bool {
-	if name == "" || len(name) > 32 {
-		return false
-	}
-	for i, r := range name {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			continue
-		}
-		if i > 0 && (r == '_' || r == '-') {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func shellQuote(s string) string {
@@ -881,7 +866,7 @@ func remoteSpec(t config.Target, remotePath string) string {
 
 func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts string, from string, to string) error {
 	args := scpArgs(t, knownHosts)
-	args = append(args, from, to)
+	args = append(args, "--", from, to)
 	cmd := exec.CommandContext(ctx, "scp", args...)
 	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSocket)
 
@@ -896,6 +881,7 @@ func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts
 func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (string, error) {
 	args := sshArgs(t, knownHosts)
 	args = append(args,
+		"--",
 		t.User+"@"+t.Host,
 		remoteCommand,
 	)
