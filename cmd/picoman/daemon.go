@@ -944,15 +944,21 @@ func warningText(s string) string { return "⚠️ " + s }
 func infoText(s string) string    { return "ℹ️ " + s }
 func unsealText() string          { return "🟡 unsealed" }
 
+const (
+	maxOutputBytes  = 3000
+	maxCommandBytes = 600
+	maxPathBytes    = 400
+)
+
 func runText(target, command, output string) string {
 	return actionText("▶️ run", target) +
-		"\n<pre><code>" + html.EscapeString(command) + "</code></pre>" +
-		"\n<pre><code>" + html.EscapeString(output) + "</code></pre>"
+		"\n<pre><code>" + html.EscapeString(truncate(command, maxCommandBytes)) + "</code></pre>" +
+		"\n<pre><code>" + html.EscapeString(truncate(output, maxOutputBytes)) + "</code></pre>"
 }
 
 func runErrorText(target, command, reason string) string {
 	return actionErrorText("▶️ run", target, reason) +
-		"\n<pre><code>" + html.EscapeString(command) + "</code></pre>"
+		"\n<pre><code>" + html.EscapeString(truncate(command, maxCommandBytes)) + "</code></pre>"
 }
 
 func actionText(action, target string) string {
@@ -965,18 +971,18 @@ func actionErrorText(action, target, reason string) string {
 
 func transferText(op, target, source, destination string) string {
 	text := actionText(op, target) +
-		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
+		"\n<pre><code>" + html.EscapeString(truncate(source, maxPathBytes)) + "</code></pre>"
 	if destination != source {
-		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"
+		text += "\n<pre><code>" + html.EscapeString(truncate(destination, maxPathBytes)) + "</code></pre>"
 	}
 	return text
 }
 
 func transferErrorText(op, target, source, destination, reason string) string {
 	text := actionErrorText(op, target, reason) +
-		"\n<pre><code>" + html.EscapeString(source) + "</code></pre>"
+		"\n<pre><code>" + html.EscapeString(truncate(source, maxPathBytes)) + "</code></pre>"
 	if destination != source {
-		text += "\n<pre><code>" + html.EscapeString(destination) + "</code></pre>"
+		text += "\n<pre><code>" + html.EscapeString(truncate(destination, maxPathBytes)) + "</code></pre>"
 	}
 	return text
 }
