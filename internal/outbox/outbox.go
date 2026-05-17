@@ -17,6 +17,12 @@ import (
 	"picoman/internal/tg"
 )
 
+const (
+	maxAttempts = 5
+	baseBackoff = time.Second
+	maxBackoff  = time.Minute
+)
+
 type Store struct {
 	db  *sql.DB
 	bot *tg.Client
@@ -28,6 +34,7 @@ type message struct {
 	replyToID int64
 	format    string
 	text      string
+	attempts  int
 }
 
 func Open(path string, bot *tg.Client) (*Store, error) {
@@ -90,15 +97,25 @@ values(?, ?, ?, ?, unixepoch())
 }
 
 func (s *Store) Run(ctx context.Context) {
+	wait := baseBackoff
 	for {
-		if err := s.SendOne(ctx); err != nil && !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
-			time.Sleep(3 * time.Second)
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
+		err := s.SendOne(ctx)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			wait = baseBackoff
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
+		case err == nil:
+			wait = baseBackoff
+		default:
+			if !sleepCtx(ctx, wait) {
+				return
+			}
+			wait *= 2
+			if wait > maxBackoff {
+				wait = maxBackoff
+			}
 		}
 	}
 }
@@ -109,9 +126,20 @@ func (s *Store) Flush(ctx context.Context) {
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
-		if err != nil {
-			time.Sleep(time.Second)
+		if err != nil && !sleepCtx(ctx, time.Second) {
+			return
 		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -120,23 +148,72 @@ func (s *Store) SendOne(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var sendErr error
-	if msg.format == "html" && msg.replyToID > 0 {
-		sendErr = s.bot.SendHTMLReply(ctx, msg.chatID, msg.replyToID, msg.text)
-	} else if msg.format == "html" {
-		sendErr = s.bot.SendHTML(ctx, msg.chatID, msg.text)
-	} else if msg.replyToID > 0 {
-		sendErr = s.bot.SendReply(ctx, msg.chatID, msg.replyToID, msg.text)
-	} else {
-		sendErr = s.bot.SendMessage(ctx, msg.chatID, msg.text)
+	sendErr := s.send(ctx, msg)
+	if sendErr == nil {
+		log.Printf("outbox sent id=%d chat=%d", msg.id, msg.chatID)
+		return s.markSent(msg.id)
 	}
-	if sendErr != nil {
-		s.fail(msg.id, sendErr)
-		log.Printf("outbox send failed id=%d chat=%d: %v", msg.id, msg.chatID, sendErr)
+
+	// Reply target gone: drop reply_to and retry on next tick.
+	if msg.replyToID > 0 && isReplyTargetGone(sendErr) {
+		log.Printf("outbox reply target gone id=%d chat=%d: %v", msg.id, msg.chatID, sendErr)
+		_ = s.clearReplyTo(msg.id)
 		return sendErr
 	}
-	log.Printf("outbox sent id=%d chat=%d", msg.id, msg.chatID)
-	return s.sent(msg.id)
+
+	var apiErr *tg.APIError
+	permanent := errors.As(sendErr, &apiErr) && !apiErr.IsRetryable()
+	if !permanent {
+		s.recordError(msg.id, sendErr)
+		log.Printf("outbox transient id=%d chat=%d: %v", msg.id, msg.chatID, sendErr)
+		return sendErr
+	}
+
+	attempts := msg.attempts + 1
+	s.fail(msg.id, attempts, sendErr)
+	if attempts >= maxAttempts {
+		s.markDead(msg.id)
+		log.Printf("outbox dead id=%d chat=%d attempts=%d: %v", msg.id, msg.chatID, attempts, sendErr)
+		go s.notifyDead(msg, sendErr)
+		return nil
+	}
+	log.Printf("outbox permanent id=%d chat=%d attempts=%d: %v", msg.id, msg.chatID, attempts, sendErr)
+	return sendErr
+}
+
+func (s *Store) send(ctx context.Context, msg message) error {
+	switch {
+	case msg.format == "html" && msg.replyToID > 0:
+		return s.bot.SendHTMLReply(ctx, msg.chatID, msg.replyToID, msg.text)
+	case msg.format == "html":
+		return s.bot.SendHTML(ctx, msg.chatID, msg.text)
+	case msg.replyToID > 0:
+		return s.bot.SendReply(ctx, msg.chatID, msg.replyToID, msg.text)
+	default:
+		return s.bot.SendMessage(ctx, msg.chatID, msg.text)
+	}
+}
+
+func isReplyTargetGone(err error) bool {
+	var apiErr *tg.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	desc := strings.ToLower(apiErr.Description)
+	if strings.Contains(desc, "message to be replied") {
+		return true
+	}
+	return strings.Contains(desc, "reply") &&
+		(strings.Contains(desc, "not found") ||
+			strings.Contains(desc, "invalid") ||
+			strings.Contains(desc, "deleted"))
+}
+
+func (s *Store) notifyDead(msg message, sendErr error) {
+	text := fmt.Sprintf("outbox dead id=%d: %s", msg.id, sendErr)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = s.bot.SendMessage(ctx, msg.chatID, text)
 }
 
 func (s *Store) init() error {
@@ -149,46 +226,54 @@ create table if not exists outbox (
 	text text not null,
 	created_at integer not null,
 	sent_at integer,
+	dead_at integer,
 	attempts integer not null default 0,
 	last_error text not null default ''
 );
-create index if not exists outbox_pending on outbox(sent_at, id);
+create index if not exists outbox_pending on outbox(sent_at, dead_at, id);
 `)
 	if err != nil {
 		return err
 	}
 	_, _ = s.db.Exec(`alter table outbox add column reply_to_id integer not null default 0`)
 	_, _ = s.db.Exec(`alter table outbox add column format text not null default ''`)
+	_, _ = s.db.Exec(`alter table outbox add column dead_at integer`)
 	return err
 }
 
 func (s *Store) next() (message, error) {
 	var msg message
 	err := s.db.QueryRow(`
-select id, chat_id, reply_to_id, format, text
+select id, chat_id, reply_to_id, format, text, attempts
 from outbox
-where sent_at is null
+where sent_at is null and dead_at is null
 order by id
 limit 1
-`).Scan(&msg.id, &msg.chatID, &msg.replyToID, &msg.format, &msg.text)
+`).Scan(&msg.id, &msg.chatID, &msg.replyToID, &msg.format, &msg.text, &msg.attempts)
 	return msg, err
 }
 
-func (s *Store) sent(id int64) error {
-	_, err := s.db.Exec(`
-update outbox
-set sent_at = unixepoch()
-where id = ?
-`, id)
+func (s *Store) markSent(id int64) error {
+	_, err := s.db.Exec(`update outbox set sent_at = unixepoch() where id = ?`, id)
 	return err
 }
 
-func (s *Store) fail(id int64, sendErr error) {
-	_, _ = s.db.Exec(`
-update outbox
-set attempts = attempts + 1, last_error = ?
-where id = ?
-`, fmt.Sprint(sendErr), id)
+func (s *Store) markDead(id int64) {
+	_, _ = s.db.Exec(`update outbox set dead_at = unixepoch() where id = ?`, id)
+}
+
+func (s *Store) clearReplyTo(id int64) error {
+	_, err := s.db.Exec(`update outbox set reply_to_id = 0 where id = ?`, id)
+	return err
+}
+
+func (s *Store) recordError(id int64, sendErr error) {
+	_, _ = s.db.Exec(`update outbox set last_error = ? where id = ?`, fmt.Sprint(sendErr), id)
+}
+
+func (s *Store) fail(id int64, attempts int, sendErr error) {
+	_, _ = s.db.Exec(`update outbox set attempts = ?, last_error = ? where id = ?`,
+		attempts, fmt.Sprint(sendErr), id)
 }
 
 func splitMessage(text string, limit int, format string) []string {
