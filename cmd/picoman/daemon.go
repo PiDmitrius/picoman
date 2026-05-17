@@ -992,6 +992,8 @@ func warningText(s string) string { return "⚠️ " + s }
 func infoText(s string) string    { return "ℹ️ " + s }
 func unsealText() string          { return "🟡 unsealed" }
 
+// Per-field byte budgets for HTML-escaped content. Sum stays well below
+// Telegram's 4096 limit even with wrapper tags and the action header.
 const (
 	maxOutputBytes  = 3000
 	maxCommandBytes = 600
@@ -1000,13 +1002,13 @@ const (
 
 func runText(target, command, output string) string {
 	return actionText("▶️ run", target) +
-		"\n<pre><code>" + html.EscapeString(truncate(command, maxCommandBytes)) + "</code></pre>" +
-		"\n<pre><code>" + html.EscapeString(truncate(output, maxOutputBytes)) + "</code></pre>"
+		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>" +
+		"\n<pre><code>" + escapedCodeBlock(output, maxOutputBytes) + "</code></pre>"
 }
 
 func runErrorText(target, command, reason string) string {
 	return actionErrorText("▶️ run", target, reason) +
-		"\n<pre><code>" + html.EscapeString(truncate(command, maxCommandBytes)) + "</code></pre>"
+		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
 }
 
 func actionText(action, target string) string {
@@ -1019,18 +1021,18 @@ func actionErrorText(action, target, reason string) string {
 
 func transferText(op, target, source, destination string) string {
 	text := actionText(op, target) +
-		"\n<pre><code>" + html.EscapeString(truncate(source, maxPathBytes)) + "</code></pre>"
+		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
 	if destination != source {
-		text += "\n<pre><code>" + html.EscapeString(truncate(destination, maxPathBytes)) + "</code></pre>"
+		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
 	}
 	return text
 }
 
 func transferErrorText(op, target, source, destination, reason string) string {
 	text := actionErrorText(op, target, reason) +
-		"\n<pre><code>" + html.EscapeString(truncate(source, maxPathBytes)) + "</code></pre>"
+		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
 	if destination != source {
-		text += "\n<pre><code>" + html.EscapeString(truncate(destination, maxPathBytes)) + "</code></pre>"
+		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
 	}
 	return text
 }
