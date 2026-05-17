@@ -381,6 +381,7 @@ commands:
 /update
 /host list
 /host <name>
+/host note <name> [note]
 /host add
 /run <target> <command>
 /get <target> <remote-file> [local-file]
@@ -438,13 +439,20 @@ func hostsText(cfg *config.Config) string {
 	}
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
-		names = append(names, hostNameText(name))
+		names = append(names, name)
 	}
 	sortStrings(names)
-	return "host list\n" + strings.Join(names, "\n")
+	lines := []string{"host list"}
+	for _, name := range names {
+		lines = append(lines, hostListLine(name, cfg.Targets[name]))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func handleHost(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) >= 3 && fields[1] == "note" {
+		return setHostNote(fields[2:], cfg)
+	}
 	if len(fields) == 2 && fields[1] == "add" {
 		line, err := hostBootstrapLine(cfg, "")
 		if err != nil {
@@ -472,7 +480,15 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 		}
 		return addHostFromFields(fields[2:], cfg)
 	}
-	return "", errors.New("usage: host <name> | host add | host add <name> <user>@<host>:<port> <keytype> <key>")
+	return "", errors.New("usage: host <name> | host list | host note <name> [note] | host add | host add <name> <user>@<host>:<port> <keytype> <key>")
+}
+
+func hostListLine(name string, target config.Target) string {
+	text := "- " + hostNameText(name)
+	if target.Note != "" {
+		text += " (" + html.EscapeString(target.Note) + ")"
+	}
+	return text
 }
 
 func hostText(name string, target config.Target) string {
@@ -484,12 +500,16 @@ func hostText(name string, target config.Target) string {
 	if target.Disabled {
 		state = "\ndisabled"
 	}
+	note := ""
+	if target.Note != "" {
+		note = "\n" + html.EscapeString(target.Note)
+	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
 		html.EscapeString(target.User),
 		html.EscapeString(target.Host),
 		port,
-		state,
+		state+note,
 	)
 }
 
@@ -543,11 +563,13 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 	if cfg.Targets == nil {
 		cfg.Targets = map[string]config.Target{}
 	}
+	existing := cfg.Targets[name]
 	cfg.Targets[name] = config.Target{
 		User:      user,
 		Host:      host,
 		Port:      port,
 		PublicKey: publicKey,
+		Note:      existing.Note,
 	}
 	if err := config.SaveHostDB(cfg); err != nil {
 		return "", err
@@ -561,6 +583,26 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 			port,
 			html.EscapeString(fp),
 		)), nil
+}
+
+func setHostNote(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) < 1 {
+		return "", errors.New("usage: host note <name> [note]")
+	}
+	name := fields[0]
+	target, ok := cfg.Targets[name]
+	if !ok {
+		return "", fmt.Errorf("unknown host %q", name)
+	}
+	target.Note = strings.Join(fields[1:], " ")
+	cfg.Targets[name] = target
+	if err := config.SaveHostDB(cfg); err != nil {
+		return "", err
+	}
+	if target.Note == "" {
+		return successText("host note cleared\n" + hostNameText(name)), nil
+	}
+	return successText("host note\n" + hostNameText(name) + "\n" + html.EscapeString(target.Note)), nil
 }
 
 func hostNameText(name string) string {
