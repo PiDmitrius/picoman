@@ -74,7 +74,12 @@ func runDaemon() {
 	go runControl(ctx, cfg, st, out, bot, audit)
 	go watchUnlockExpiry(ctx, st, out, cfg, bot)
 
-	notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
+	marker := readRestartMarker()
+	if marker.Reason == "update" {
+		notifyUsers(out, cfg, bot, infoText(updateLifecycleText(marker)))
+	} else {
+		notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
+	}
 	if autoUnsealed {
 		notifyUsers(out, cfg, bot, unsealText())
 	}
@@ -111,6 +116,13 @@ func lifecycleText(event string, cleanup agent.CleanResult) string {
 		text += "\n\n" + cleanup.String()
 	}
 	return text
+}
+
+func updateLifecycleText(marker restartMarker) string {
+	if marker.From != "" && marker.To != "" {
+		return "picoman updated " + marker.From + " -> " + marker.To
+	}
+	return "picoman " + version + " updated"
 }
 
 func notifyUsers(out *outbox.Store, cfg *config.Config, bot *tg.Client, text string) {
@@ -223,6 +235,9 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		reply = infoText(botHelpText())
 	case "status":
 		reply = infoText(statusText(st))
+	case "update":
+		go handleUpdateMessage(out, bot, msg)
+		return
 	case "hosts":
 		reply = infoText(hostsText(cfg))
 		replyHTML = true
@@ -345,6 +360,7 @@ commands:
 /seal
 /lock
 /status
+/update
 /hosts
 /host <name>
 /host add

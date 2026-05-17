@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.51"
+const version = "v0.1.52"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -51,6 +51,8 @@ func main() {
 		runAskpass()
 	case "update":
 		runUpdate()
+	case "fallback":
+		runFallback(os.Args[2:])
 	case "version":
 		fmt.Printf("picoman %s\n", version)
 	default:
@@ -76,7 +78,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  loglevel    Set audit log level: chat or all")
 	fmt.Fprintln(os.Stderr, "  stop        Stop the service")
 	fmt.Fprintln(os.Stderr, "  restart     Restart the service")
-	fmt.Fprintln(os.Stderr, "  update      Bump, build, install and restart from local source")
+	fmt.Fprintln(os.Stderr, "  update      Update from source_dir or latest GitHub release")
+	fmt.Fprintln(os.Stderr, "  fallback    Install a specific GitHub release")
 	fmt.Fprintln(os.Stderr, "  status      Show service status")
 	fmt.Fprintln(os.Stderr, "  version     Print version")
 }
