@@ -457,7 +457,7 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 }
 
 func commandName(s string) string {
-	return strings.TrimPrefix(strings.ToLower(s), "/")
+	return strings.TrimLeft(strings.ToLower(s), "/")
 }
 
 func botHelpText() string {
@@ -940,16 +940,16 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 		}
 		return out, fmt.Errorf("ssh: %w", err)
 	}
-	if out == "" && errOut != "" {
-		return errOut, nil
-	}
-	if errOut != "" {
+	switch {
+	case out == "" && errOut == "":
+		return "(no output)", nil
+	case errOut == "":
+		return out, nil
+	case out == "":
+		return "stderr:\n" + errOut, nil
+	default:
 		return out + "\n\nstderr:\n" + errOut, nil
 	}
-	if out == "" {
-		return "ok", nil
-	}
-	return out, nil
 }
 
 // sshCommonOpts builds the options shared by ssh and scp.

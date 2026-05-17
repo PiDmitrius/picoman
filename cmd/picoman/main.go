@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.63"
+const version = "v0.1.64"
 
 func main() {
 	log.SetPrefix("picoman: ")
