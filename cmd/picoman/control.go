@@ -403,17 +403,18 @@ func runHostList() {
 	cfg := loadHosts()
 	names := cfg.HostNames()
 	if len(names) == 0 {
-		fmt.Println("(no hosts)")
+		fmt.Println("host list empty")
 		return
 	}
+	fmt.Println("host list")
 	for _, n := range names {
 		t, _ := cfg.Target(n)
-		line := n
+		line := "- " + n
 		if t.Note != "" {
-			line += "  " + t.Note
+			line += " (" + t.Note + ")"
 		}
 		if t.Disabled {
-			line += "  (disabled)"
+			line += " (disabled)"
 		}
 		fmt.Println(line)
 	}
@@ -430,18 +431,13 @@ func runHostShow(name string) {
 	if port == 0 {
 		port = 22
 	}
-	fmt.Printf("%s\n%s@%s:%d\n", name, t.User, t.Host, port)
+	fmt.Println(name)
+	fmt.Printf("%s@%s:%d\n", t.User, t.Host, port)
+	if t.Disabled {
+		fmt.Println("disabled")
+	}
 	if t.Note != "" {
 		fmt.Println(t.Note)
-	}
-	if t.Disabled {
-		fmt.Println("(disabled)")
-	}
-	if t.WorkDir != "" {
-		fmt.Println("work_dir: " + t.WorkDir)
-	}
-	if t.PublicKey != "" {
-		fmt.Println(t.PublicKey)
 	}
 }
 
