@@ -287,20 +287,6 @@ func updateText() (string, error) {
 	return strings.TrimSpace(sb.String()), nil
 }
 
-func handleUpdateMessage(out *outbox.Store, bot *tg.Client, msg tg.Message) {
-	text, err := updateText()
-	if err != nil {
-		text = errorText(err.Error())
-		if enqueueErr := out.EnqueueReply(msg.Chat.ID, msg.MessageID, text); enqueueErr != nil {
-			logEnqueueError(bot, msg.Chat.ID, enqueueErr)
-		}
-		return
-	}
-	if err := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, infoText(text)); err != nil {
-		logEnqueueError(bot, msg.Chat.ID, err)
-	}
-}
-
 func handleInstallVersionMessage(out *outbox.Store, bot *tg.Client, msg tg.Message, tag string) {
 	if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, "⏳ installing "+tag+"..."); err != nil {
 		logEnqueueError(bot, msg.Chat.ID, err)

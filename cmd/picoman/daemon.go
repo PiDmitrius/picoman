@@ -219,152 +219,242 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 	}
 }
 
+type cmdCtx struct {
+	ctx context.Context
+	cfg *config.Config
+	st  *agent.State
+}
+
+type cmdReply struct {
+	text string
+	html bool
+}
+
+type cmdHandler func(c cmdCtx, fields []string) (cmdReply, error)
+
+type cmdEntry struct {
+	fn    cmdHandler
+	async bool
+}
+
+var commands = map[string]cmdEntry{
+	"start":  {fn: cmdHelp},
+	"help":   {fn: cmdHelp},
+	"status": {fn: cmdStatus},
+	"hosts":  {fn: cmdHostList},
+	"host":   {fn: cmdHost},
+	"unlock": {fn: cmdUnlock},
+	"seal":   {fn: cmdSeal},
+	"lock":   {fn: cmdLock},
+	"update": {fn: cmdUpdate, async: true},
+	"run":    {fn: cmdRun, async: true},
+	"get":    {fn: cmdGet, async: true},
+	"put":    {fn: cmdPut, async: true},
+}
+
 func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		log.Printf("deny user=%d username=%s text=%q", msg.From.ID, msg.From.Username, msg.Text)
-		if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, errorText("denied")); err != nil {
-			go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
-		}
+		enqueueReply(out, bot, msg, cmdReply{text: errorText("denied")})
 		return
 	}
 
-	text := strings.TrimSpace(msg.Text)
-	fields := strings.Fields(text)
+	fields := strings.Fields(strings.TrimSpace(msg.Text))
 	if len(fields) == 0 {
 		return
 	}
+	name := commandName(fields[0])
 
-	var reply string
-	var err error
-	replyHTML := false
-	cmd := commandName(fields[0])
-
-	if isVersionCommand(cmd) {
-		go handleInstallVersionMessage(out, bot, msg, tagFromVersionCommand(cmd))
+	if isVersionCommand(name) {
+		go handleInstallVersionMessage(out, bot, msg, tagFromVersionCommand(name))
 		return
 	}
 
-	switch cmd {
-	case "start", "help":
-		reply = infoText(botHelpText())
-	case "status":
-		reply = infoText(statusText(st))
-	case "update":
-		go handleUpdateMessage(out, bot, msg)
+	entry, ok := commands[name]
+	if !ok {
+		enqueueReply(out, bot, msg, cmdReply{text: warningText("unknown command\n\n" + botHelpText())})
 		return
-	case "hosts":
-		reply = infoText(hostsText(cfg))
-		replyHTML = true
-	case "host":
-		if len(fields) == 2 && fields[1] == "list" {
-			reply = infoText(hostsText(cfg))
-			replyHTML = true
-			break
-		}
-		reply, err = handleHost(fields, cfg)
-		if err == nil {
-			replyHTML = true
-		} else if len(fields) == 2 && fields[1] != "add" {
-			reply = "❌ unknown host " + hostNameText(fields[1])
-			replyHTML = true
-		}
-	case "unlock":
-		reply, err = handleUnlock(fields, st)
-	case "seal":
-		err = st.Lock()
-		if err == nil {
-			st.Seal()
-			reply = "⚪ sealed"
-		}
-	case "lock":
-		err = st.Lock()
-		if err == nil {
-			reply = "🔒 locked"
-		}
-	case "run":
-		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
-		return
-	case "get":
-		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
-		return
-	case "put":
-		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
-		return
-	default:
-		reply = warningText("unknown command\n\n" + botHelpText())
 	}
 
-	if err != nil {
-		if reply == "" {
-			reply = errorText(err.Error())
+	c := cmdCtx{ctx: ctx, cfg: cfg, st: st}
+	run := func() {
+		reply, err := entry.fn(c, fields)
+		logCommand(msg, err)
+		if reply.text == "" && err != nil {
+			reply.text = errorText(err.Error())
 		}
-		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, text, err)
-	} else {
-		log.Printf("command ok user=%d command=%q", msg.From.ID, text)
+		enqueueReply(out, bot, msg, reply)
 	}
-
-	var enqueueErr error
-	if replyHTML {
-		enqueueErr = out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply)
-	} else {
-		enqueueErr = out.EnqueueReply(msg.Chat.ID, msg.MessageID, reply)
+	if entry.async {
+		go run()
+		return
 	}
-	if enqueueErr != nil {
-		log.Printf("enqueue reply: %v", enqueueErr)
-		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-	}
+	run()
 }
 
-func handleAsyncAction(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message, fields []string) {
-	reply, err := handleAsyncActionReply(ctx, cfg, st, fields)
+func logCommand(msg tg.Message, err error) {
 	if err != nil {
 		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, msg.Text, err)
+		return
+	}
+	log.Printf("command ok user=%d command=%q", msg.From.ID, msg.Text)
+}
+
+func enqueueReply(out *outbox.Store, bot *tg.Client, msg tg.Message, r cmdReply) {
+	if r.text == "" {
+		return
+	}
+	var err error
+	if r.html {
+		err = out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, r.text)
 	} else {
-		log.Printf("command ok user=%d command=%q", msg.From.ID, msg.Text)
+		err = out.EnqueueReply(msg.Chat.ID, msg.MessageID, r.text)
 	}
-	if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
-		log.Printf("enqueue reply: %v", enqueueErr)
-		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-	}
-}
-
-func handleAsyncActionReply(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
-	switch commandName(fields[0]) {
-	case "run":
-		reply, err := handleRun(ctx, cfg, st, fields)
-		if err == nil || len(fields) < 3 {
-			return replyOrError(reply, err)
-		}
-		return runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error()), err
-	case "get":
-		reply, err := handleGet(ctx, cfg, st, fields)
-		if err == nil || len(fields) < 3 {
-			return replyOrError(reply, err)
-		}
-		localName := defaultTransferName(fields[2])
-		if len(fields) >= 4 {
-			localName = fields[3]
-		}
-		return transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error()), err
-	case "put":
-		reply, err := handlePut(ctx, cfg, st, fields)
-		if err == nil || len(fields) < 3 {
-			return replyOrError(reply, err)
-		}
-		remoteName := defaultTransferName(fields[2])
-		if len(fields) >= 4 {
-			remoteName = fields[3]
-		}
-		return transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error()), err
-	}
-	return errorText("unknown command"), errors.New("unknown command")
-}
-
-func replyOrError(reply string, err error) (string, error) {
 	if err != nil {
-		return errorText(err.Error()), err
+		log.Printf("enqueue reply: %v", err)
+		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
 	}
-	return reply, nil
+}
+
+func cmdHelp(_ cmdCtx, _ []string) (cmdReply, error) {
+	return cmdReply{text: infoText(botHelpText())}, nil
+}
+
+func cmdStatus(c cmdCtx, _ []string) (cmdReply, error) {
+	return cmdReply{text: infoText(statusText(c.st))}, nil
+}
+
+func cmdHostList(c cmdCtx, _ []string) (cmdReply, error) {
+	return cmdReply{text: infoText(hostsText(c.cfg)), html: true}, nil
+}
+
+func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) < 2 {
+		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]]")
+	}
+	switch fields[1] {
+	case "list":
+		return cmdHostList(c, fields)
+	case "note":
+		text, err := setHostNote(fields[2:], c.cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
+		}
+		return cmdReply{text: text, html: true}, nil
+	case "add":
+		return hostAdd(c.cfg, fields[2:])
+	default:
+		name := fields[1]
+		target, ok := c.cfg.Target(name)
+		if !ok {
+			return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
+		}
+		return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
+	}
+}
+
+func hostAdd(cfg *config.Config, args []string) (cmdReply, error) {
+	switch len(args) {
+	case 0:
+		line, err := hostBootstrapLine(cfg, "")
+		if err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: "<pre><code>" + html.EscapeString(line) + "</code></pre>", html: true}, nil
+	case 1:
+		if !config.ValidName(args[0]) {
+			return cmdReply{}, fmt.Errorf("bad host name %q", args[0])
+		}
+		line, err := hostBootstrapLine(cfg, args[0])
+		if err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: "<pre><code>" + html.EscapeString(line) + "</code></pre>", html: true}, nil
+	default:
+		text, err := addHostFromFields(args, cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
+		}
+		return cmdReply{text: text, html: true}, nil
+	}
+}
+
+func cmdUnlock(c cmdCtx, fields []string) (cmdReply, error) {
+	text, err := handleUnlock(fields, c.st)
+	return cmdReply{text: text}, err
+}
+
+func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
+	if err := c.st.Lock(); err != nil {
+		return cmdReply{}, err
+	}
+	c.st.Seal()
+	return cmdReply{text: "⚪ sealed"}, nil
+}
+
+func cmdLock(c cmdCtx, _ []string) (cmdReply, error) {
+	if err := c.st.Lock(); err != nil {
+		return cmdReply{}, err
+	}
+	return cmdReply{text: "🔒 locked"}, nil
+}
+
+func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
+	text, err := updateText()
+	if err != nil {
+		return cmdReply{}, err
+	}
+	return cmdReply{text: infoText(text), html: true}, nil
+}
+
+func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
+	text, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	if err == nil {
+		return cmdReply{text: text, html: true}, nil
+	}
+	if len(fields) < 3 {
+		return cmdReply{html: true}, err
+	}
+	return cmdReply{
+		text: runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error()),
+		html: true,
+	}, err
+}
+
+func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
+	text, err := handleGet(c.ctx, c.cfg, c.st, fields)
+	if err == nil {
+		return cmdReply{text: text, html: true}, nil
+	}
+	if len(fields) < 3 {
+		return cmdReply{html: true}, err
+	}
+	localName := defaultTransferName(fields[2])
+	if len(fields) >= 4 {
+		localName = fields[3]
+	}
+	return cmdReply{
+		text: transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error()),
+		html: true,
+	}, err
+}
+
+func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
+	text, err := handlePut(c.ctx, c.cfg, c.st, fields)
+	if err == nil {
+		return cmdReply{text: text, html: true}, nil
+	}
+	if len(fields) < 3 {
+		return cmdReply{html: true}, err
+	}
+	remoteName := defaultTransferName(fields[2])
+	if len(fields) >= 4 {
+		remoteName = fields[3]
+	}
+	return cmdReply{
+		text: transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error()),
+		html: true,
+	}, err
 }
 
 func commandName(s string) string {
@@ -449,40 +539,6 @@ func hostsText(cfg *config.Config) string {
 		lines = append(lines, hostListLine(name, targets[name]))
 	}
 	return strings.Join(lines, "\n")
-}
-
-func handleHost(fields []string, cfg *config.Config) (string, error) {
-	if len(fields) >= 3 && fields[1] == "note" {
-		return setHostNote(fields[2:], cfg)
-	}
-	if len(fields) == 2 && fields[1] == "add" {
-		line, err := hostBootstrapLine(cfg, "")
-		if err != nil {
-			return "", err
-		}
-		return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
-	}
-	if len(fields) == 2 {
-		target, ok := cfg.Target(fields[1])
-		if !ok {
-			return "", fmt.Errorf("unknown host %q", fields[1])
-		}
-		return infoText(hostText(fields[1], target)), nil
-	}
-	if len(fields) >= 3 && fields[1] == "add" {
-		if len(fields) == 3 {
-			if !config.ValidName(fields[2]) {
-				return "", fmt.Errorf("bad host name %q", fields[2])
-			}
-			line, err := hostBootstrapLine(cfg, fields[2])
-			if err != nil {
-				return "", err
-			}
-			return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
-		}
-		return addHostFromFields(fields[2:], cfg)
-	}
-	return "", errors.New("usage: host <name> | host list | host note <name> [note] | host add | host add <name> <user>@<host>:<port> <keytype> <key>")
 }
 
 func hostListLine(name string, target config.Target) string {
