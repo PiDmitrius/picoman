@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,42 @@ import (
 	"picoman/internal/outbox"
 	"picoman/internal/tg"
 )
+
+// Control protocol (Unix socket, line-based):
+//
+//	Request : VERB [<b64-arg>]*\n
+//	Response: OK [<b64-data>]\n  |  ERR <reason>\n
+//
+// All textual arguments are base64-encoded so the parser can tokenize on
+// spaces without worrying about embedded whitespace or newlines. ASKPASS is
+// the single exception: it speaks the ssh-add askpass format (raw passphrase
+// line or empty line) and is dispatched before the protocol parser.
+
+type controlServer struct {
+	cfg   *config.Config
+	st    *agent.State
+	out   *outbox.Store
+	bot   *tg.Client
+	audit *auditState
+}
+
+type controlHandler func(ctx context.Context, args [][]byte) ([]byte, error)
+
+func (s *controlServer) handlers() map[string]controlHandler {
+	bind := func(fn func([][]byte) ([]byte, error)) controlHandler {
+		return func(_ context.Context, a [][]byte) ([]byte, error) { return fn(a) }
+	}
+	return map[string]controlHandler{
+		"UNSEAL":   bind(s.unseal),
+		"SEAL":     bind(s.seal),
+		"UNLOCK":   bind(s.unlock),
+		"LOCK":     bind(s.lock),
+		"LOGLEVEL": bind(s.loglevel),
+		"RUN":      s.run,
+		"GET":      s.get,
+		"PUT":      s.put,
+	}
+}
 
 func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client, audit *auditState) {
 	_ = os.Remove(cfg.ControlSocket)
@@ -34,6 +71,7 @@ func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *o
 		_ = ln.Close()
 	}()
 
+	srv := &controlServer{cfg: cfg, st: st, out: out, bot: bot, audit: audit}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -42,155 +80,188 @@ func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *o
 			}
 			continue
 		}
-		go handleControl(conn, cfg, st, out, bot, audit)
+		go srv.handle(ctx, conn)
 	}
 }
 
-func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client, audit *auditState) {
+func (s *controlServer) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		return
 	}
-	line = strings.TrimSpace(line)
+	line = strings.TrimRight(line, "\r\n")
 
-	switch {
-	case strings.HasPrefix(line, "UNSEAL "):
-		raw := strings.TrimPrefix(line, "UNSEAL ")
-		data, err := base64.StdEncoding.DecodeString(raw)
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad secret\n")
-			return
-		}
-		if err := st.Unseal(string(data)); err != nil {
-			notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		notify(out, cfg, bot, false, unsealText())
-		_, _ = io.WriteString(conn, "OK\n")
-	case line == "SEAL":
-		if err := st.Lock(); err != nil {
-			notify(out, cfg, bot, false, errorText("seal failed: "+err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		st.Seal()
-		notify(out, cfg, bot, false, "⚪ sealed")
-		_, _ = io.WriteString(conn, "OK\n")
-	case line == "ASKPASS":
-		passphrase := st.Passphrase()
-		if passphrase == "" {
-			_, _ = io.WriteString(conn, "\n")
-			return
-		}
-		_, _ = io.WriteString(conn, passphrase+"\n")
-	case strings.HasPrefix(line, "UNLOCK "):
-		rawTTL := strings.TrimPrefix(line, "UNLOCK ")
-		ttl, err := time.ParseDuration(rawTTL)
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad ttl\n")
-			return
-		}
-		if err := st.Unlock(ttl); err != nil {
-			notify(out, cfg, bot, false, errorText("unlock failed: "+err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		notify(out, cfg, bot, false, "🟡 unlocked ("+leftText(st.Until())+")")
-		_, _ = io.WriteString(conn, "OK\n")
-	case line == "LOCK":
-		if err := st.Lock(); err != nil {
-			notify(out, cfg, bot, false, errorText("lock failed: "+err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		notify(out, cfg, bot, false, "🔒 locked")
-		_, _ = io.WriteString(conn, "OK\n")
-	case strings.HasPrefix(line, "LOGLEVEL "):
-		level := strings.TrimPrefix(line, "LOGLEVEL ")
-		if !audit.SetLogLevel(level) {
-			_, _ = io.WriteString(conn, "ERR bad loglevel\n")
-			return
-		}
-		notify(out, cfg, bot, false, "⚙️ loglevel "+level)
-		_, _ = io.WriteString(conn, "OK\n")
-	case strings.HasPrefix(line, "RUN "):
-		parts := strings.SplitN(strings.TrimPrefix(line, "RUN "), " ", 2)
-		if len(parts) != 2 {
-			_, _ = io.WriteString(conn, "ERR bad run request\n")
-			return
-		}
-		command, err := base64.StdEncoding.DecodeString(parts[1])
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad command\n")
-			return
-		}
-		output, err := runTarget(context.Background(), cfg, st, parts[0], string(command))
-		if err != nil {
-			notify(out, cfg, bot, true, runErrorText(parts[0], string(command), err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		if audit.LogLevel() == "all" {
-			notify(out, cfg, bot, true, runText(parts[0], string(command), output))
-		} else {
-			notify(out, cfg, bot, true, actionText("▶️ run", parts[0]))
-		}
-		_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(output))+"\n")
-	case strings.HasPrefix(line, "GET "):
-		parts := strings.Split(strings.TrimPrefix(line, "GET "), " ")
-		if len(parts) != 3 {
-			_, _ = io.WriteString(conn, "ERR bad get request\n")
-			return
-		}
-		remoteName, err := base64.StdEncoding.DecodeString(parts[1])
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad remote file\n")
-			return
-		}
-		localName, err := base64.StdEncoding.DecodeString(parts[2])
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad local file\n")
-			return
-		}
-		err = copyFromTarget(context.Background(), cfg, st, parts[0], string(remoteName), string(localName))
-		if err != nil {
-			notify(out, cfg, bot, true, transferErrorText("⬅️ get", parts[0], string(remoteName), string(localName), err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		notify(out, cfg, bot, true, transferText("⬅️ get", parts[0], string(remoteName), string(localName)))
-		_, _ = io.WriteString(conn, "OK\n")
-	case strings.HasPrefix(line, "PUT "):
-		parts := strings.Split(strings.TrimPrefix(line, "PUT "), " ")
-		if len(parts) != 3 {
-			_, _ = io.WriteString(conn, "ERR bad put request\n")
-			return
-		}
-		localName, err := base64.StdEncoding.DecodeString(parts[1])
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad local file\n")
-			return
-		}
-		remoteName, err := base64.StdEncoding.DecodeString(parts[2])
-		if err != nil {
-			_, _ = io.WriteString(conn, "ERR bad remote file\n")
-			return
-		}
-		err = copyToTarget(context.Background(), cfg, st, parts[0], string(localName), string(remoteName))
-		if err != nil {
-			notify(out, cfg, bot, true, transferErrorText("➡️ put", parts[0], string(localName), string(remoteName), err.Error()))
-			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-			return
-		}
-		notify(out, cfg, bot, true, transferText("➡️ put", parts[0], string(localName), string(remoteName)))
-		_, _ = io.WriteString(conn, "OK\n")
-	default:
-		_, _ = io.WriteString(conn, "ERR unknown command\n")
+	verb, args, parseErr := parseControlRequest(line)
+	if parseErr != nil {
+		writeErr(conn, parseErr)
+		return
 	}
+	if verb == "ASKPASS" {
+		handleAskpass(conn, s.st)
+		return
+	}
+	h, ok := s.handlers()[verb]
+	if !ok {
+		writeErr(conn, errors.New("unknown command"))
+		return
+	}
+	data, err := h(ctx, args)
+	if err != nil {
+		writeErr(conn, err)
+		return
+	}
+	writeOK(conn, data)
 }
+
+func parseControlRequest(line string) (string, [][]byte, error) {
+	if line == "" {
+		return "", nil, errors.New("empty request")
+	}
+	parts := strings.Split(line, " ")
+	verb := parts[0]
+	if verb == "ASKPASS" {
+		return verb, nil, nil
+	}
+	args := make([][]byte, 0, len(parts)-1)
+	for _, p := range parts[1:] {
+		data, err := base64.StdEncoding.DecodeString(p)
+		if err != nil {
+			return "", nil, fmt.Errorf("bad argument encoding")
+		}
+		args = append(args, data)
+	}
+	return verb, args, nil
+}
+
+func writeOK(conn net.Conn, data []byte) {
+	if len(data) == 0 {
+		_, _ = io.WriteString(conn, "OK\n")
+		return
+	}
+	_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString(data)+"\n")
+}
+
+func writeErr(conn net.Conn, err error) {
+	_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
+}
+
+func handleAskpass(conn net.Conn, st *agent.State) {
+	passphrase := st.Passphrase()
+	if passphrase == "" {
+		_, _ = io.WriteString(conn, "\n")
+		return
+	}
+	_, _ = io.WriteString(conn, passphrase+"\n")
+}
+
+// --- handlers ---
+
+func (s *controlServer) unseal(args [][]byte) ([]byte, error) {
+	if len(args) != 1 {
+		return nil, errors.New("usage: UNSEAL <passphrase>")
+	}
+	if err := s.st.Unseal(string(args[0])); err != nil {
+		notify(s.out, s.cfg, s.bot, false, errorText("unseal failed: "+err.Error()))
+		return nil, err
+	}
+	notify(s.out, s.cfg, s.bot, false, unsealText())
+	return nil, nil
+}
+
+func (s *controlServer) seal(_ [][]byte) ([]byte, error) {
+	if err := s.st.Lock(); err != nil {
+		notify(s.out, s.cfg, s.bot, false, errorText("seal failed: "+err.Error()))
+		return nil, err
+	}
+	s.st.Seal()
+	notify(s.out, s.cfg, s.bot, false, "⚪ sealed")
+	return nil, nil
+}
+
+func (s *controlServer) unlock(args [][]byte) ([]byte, error) {
+	if len(args) != 1 {
+		return nil, errors.New("usage: UNLOCK <ttl>")
+	}
+	ttl, err := time.ParseDuration(string(args[0]))
+	if err != nil {
+		return nil, fmt.Errorf("bad ttl: %w", err)
+	}
+	if err := s.st.Unlock(ttl); err != nil {
+		notify(s.out, s.cfg, s.bot, false, errorText("unlock failed: "+err.Error()))
+		return nil, err
+	}
+	notify(s.out, s.cfg, s.bot, false, "🟡 unlocked ("+leftText(s.st.Until())+")")
+	return nil, nil
+}
+
+func (s *controlServer) lock(_ [][]byte) ([]byte, error) {
+	if err := s.st.Lock(); err != nil {
+		notify(s.out, s.cfg, s.bot, false, errorText("lock failed: "+err.Error()))
+		return nil, err
+	}
+	notify(s.out, s.cfg, s.bot, false, "🔒 locked")
+	return nil, nil
+}
+
+func (s *controlServer) loglevel(args [][]byte) ([]byte, error) {
+	if len(args) != 1 {
+		return nil, errors.New("usage: LOGLEVEL <chat|all>")
+	}
+	level := string(args[0])
+	if !s.audit.SetLogLevel(level) {
+		return nil, errors.New("bad loglevel")
+	}
+	notify(s.out, s.cfg, s.bot, false, "⚙️ loglevel "+level)
+	return nil, nil
+}
+
+func (s *controlServer) run(ctx context.Context, args [][]byte) ([]byte, error) {
+	if len(args) != 2 {
+		return nil, errors.New("usage: RUN <host> <command>")
+	}
+	host, command := string(args[0]), string(args[1])
+	output, err := runTarget(ctx, s.cfg, s.st, host, command)
+	if err != nil {
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, err.Error()))
+		return nil, err
+	}
+	if s.audit.LogLevel() == "all" {
+		notify(s.out, s.cfg, s.bot, true, runText(host, command, output))
+	} else {
+		notify(s.out, s.cfg, s.bot, true, actionText("▶️ run", host))
+	}
+	return []byte(output), nil
+}
+
+func (s *controlServer) get(ctx context.Context, args [][]byte) ([]byte, error) {
+	if len(args) != 3 {
+		return nil, errors.New("usage: GET <host> <remote> <local>")
+	}
+	host, remote, local := string(args[0]), string(args[1]), string(args[2])
+	if err := copyFromTarget(ctx, s.cfg, s.st, host, remote, local); err != nil {
+		notify(s.out, s.cfg, s.bot, true, transferErrorText("⬅️ get", host, remote, local, err.Error()))
+		return nil, err
+	}
+	notify(s.out, s.cfg, s.bot, true, transferText("⬅️ get", host, remote, local))
+	return nil, nil
+}
+
+func (s *controlServer) put(ctx context.Context, args [][]byte) ([]byte, error) {
+	if len(args) != 3 {
+		return nil, errors.New("usage: PUT <host> <local> <remote>")
+	}
+	host, local, remote := string(args[0]), string(args[1]), string(args[2])
+	if err := copyToTarget(ctx, s.cfg, s.st, host, local, remote); err != nil {
+		notify(s.out, s.cfg, s.bot, true, transferErrorText("➡️ put", host, local, remote, err.Error()))
+		return nil, err
+	}
+	notify(s.out, s.cfg, s.bot, true, transferText("➡️ put", host, local, remote))
+	return nil, nil
+}
+
+// --- CLI ---
 
 func runUnseal(args []string) {
 	passphrase, err := readPassphrase(args)
@@ -202,7 +273,7 @@ func runUnseal(args []string) {
 		fmt.Fprintln(os.Stderr, "empty passphrase")
 		os.Exit(1)
 	}
-	simpleControl("UNSEAL " + base64.StdEncoding.EncodeToString([]byte(passphrase)))
+	simpleControl("UNSEAL", passphrase)
 }
 
 func runSeal() { simpleControl("SEAL") }
@@ -217,7 +288,7 @@ func runUnlock(args []string) {
 	if len(args) == 1 {
 		ttl = args[0]
 	}
-	simpleControl("UNLOCK " + ttl)
+	simpleControl("UNLOCK", ttl)
 }
 
 func runLocalRun(args []string) {
@@ -225,19 +296,14 @@ func runLocalRun(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
 		os.Exit(1)
 	}
-	command := strings.Join(args[1:], " ")
-	resp := requestControl("RUN " + args[0] + " " + base64.StdEncoding.EncodeToString([]byte(command)))
-	if strings.HasPrefix(resp, "ERR ") {
-		fmt.Print(resp)
-		os.Exit(1)
-	}
-	raw := strings.TrimSpace(strings.TrimPrefix(resp, "OK "))
-	data, err := base64.StdEncoding.DecodeString(raw)
+	data, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(string(data))
+	if len(data) > 0 {
+		fmt.Println(string(data))
+	}
 }
 
 func runLocalGet(args []string) {
@@ -249,9 +315,7 @@ func runLocalGet(args []string) {
 	if len(args) == 3 {
 		localName = args[2]
 	}
-	simpleControl("GET " + args[0] + " " +
-		base64.StdEncoding.EncodeToString([]byte(args[1])) + " " +
-		base64.StdEncoding.EncodeToString([]byte(localName)))
+	simpleControl("GET", args[0], args[1], localName)
 }
 
 func runLocalPut(args []string) {
@@ -263,9 +327,7 @@ func runLocalPut(args []string) {
 	if len(args) == 3 {
 		remoteName = args[2]
 	}
-	simpleControl("PUT " + args[0] + " " +
-		base64.StdEncoding.EncodeToString([]byte(args[1])) + " " +
-		base64.StdEncoding.EncodeToString([]byte(remoteName)))
+	simpleControl("PUT", args[0], args[1], remoteName)
 }
 
 func runLogLevel(args []string) {
@@ -273,41 +335,65 @@ func runLogLevel(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman loglevel <chat|all>")
 		os.Exit(1)
 	}
-	simpleControl("LOGLEVEL " + args[0])
+	simpleControl("LOGLEVEL", args[0])
 }
 
 func runAskpass() {
+	// ASKPASS is special: it speaks raw ssh-askpass format, not OK/ERR.
 	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "ASKPASS")
+	resp, err := rawControl(cfg.ControlSocket, "ASKPASS")
 	if err != nil {
 		os.Exit(1)
 	}
 	fmt.Print(resp)
 }
 
-// requestControl sends one line and returns the response, exiting on transport error.
-func requestControl(line string) string {
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, line)
+// simpleControl runs a verb, prints the response payload (if any), exits non-zero on ERR.
+func simpleControl(verb string, args ...string) {
+	data, err := requestControl(verb, args...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	return resp
+	if len(data) > 0 {
+		os.Stdout.Write(data)
+		if !strings.HasSuffix(string(data), "\n") {
+			fmt.Println()
+		}
+	}
 }
 
-// simpleControl sends one line and prints the response, exiting non-zero on ERR.
-func simpleControl(line string) {
-	printControlResponse(requestControl(line))
+// requestControl encodes args, sends the request, and decodes the OK payload.
+// Returns the raw payload bytes (possibly empty), or an error from ERR/transport.
+func requestControl(verb string, args ...string) ([]byte, error) {
+	cfg := loadConfigOrExit()
+	line := verb
+	for _, a := range args {
+		line += " " + base64.StdEncoding.EncodeToString([]byte(a))
+	}
+	resp, err := rawControl(cfg.ControlSocket, line)
+	if err != nil {
+		return nil, err
+	}
+	resp = strings.TrimRight(resp, "\r\n")
+	switch {
+	case resp == "OK":
+		return nil, nil
+	case strings.HasPrefix(resp, "OK "):
+		return base64.StdEncoding.DecodeString(strings.TrimPrefix(resp, "OK "))
+	case strings.HasPrefix(resp, "ERR "):
+		return nil, errors.New(strings.TrimPrefix(resp, "ERR "))
+	default:
+		return nil, fmt.Errorf("unexpected response: %q", resp)
+	}
 }
 
-func controlRequest(socket, line string) (string, error) {
+func rawControl(socket, line string) (string, error) {
 	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-
 	if _, err := io.WriteString(conn, line+"\n"); err != nil {
 		return "", err
 	}
@@ -316,13 +402,6 @@ func controlRequest(socket, line string) (string, error) {
 		return "", err
 	}
 	return string(resp), nil
-}
-
-func printControlResponse(resp string) {
-	fmt.Print(resp)
-	if strings.HasPrefix(resp, "ERR ") {
-		os.Exit(1)
-	}
 }
 
 func readPassphrase(args []string) (string, error) {
