@@ -2,24 +2,44 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
 
-// truncate cuts s to at most n bytes on a UTF-8 boundary and appends a
-// "truncated N bytes" marker when content was dropped. n is a soft cap;
-// the returned string may be slightly longer due to the marker.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+// escapedCodeBlock escapes s for HTML and trims so the escaped output (plus
+// the truncated marker) fits within budget bytes. Trimming happens on a UTF-8
+// boundary in the *source* string before escaping, so HTML entities and tags
+// are never split mid-sequence — Telegram parses them cleanly.
+func escapedCodeBlock(s string, budget int) string {
+	escaped := html.EscapeString(s)
+	if len(escaped) <= budget {
+		return escaped
 	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	// Reserve space for the marker so we don't overshoot when we add it.
+	target := budget - len("\n... (truncated 9999999 bytes)")
+	if target < 0 {
+		target = 0
 	}
-	return s[:cut] + fmt.Sprintf("\n... (truncated %d bytes)", len(s)-cut)
+	// Binary search the largest source prefix whose escaped form fits.
+	lo, hi := 0, len(s)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		for mid > 0 && !utf8.RuneStart(s[mid]) {
+			mid--
+		}
+		if mid == lo {
+			break
+		}
+		if len(html.EscapeString(s[:mid])) <= target {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return html.EscapeString(s[:lo]) + fmt.Sprintf("\n... (truncated %d bytes)", len(s)-lo)
 }
 
 func tildePath(path string) string {
