@@ -275,7 +275,9 @@ func updateText() (string, error) {
 		if len(date) > 10 {
 			date = date[:10]
 		}
-		fmt.Fprintf(&sb, "<a href=\"%s\">%s</a> %s%s\n",
+		alias := strings.ReplaceAll(strings.TrimPrefix(r.Tag, "v"), ".", "_")
+		fmt.Fprintf(&sb, "/v%s <a href=\"%s\">%s</a> %s%s\n",
+			html.EscapeString(alias),
 			html.EscapeString(r.URL),
 			html.EscapeString(r.Tag),
 			html.EscapeString(date),
@@ -297,6 +299,42 @@ func handleUpdateMessage(out *outbox.Store, bot *tg.Client, msg tg.Message) {
 	if err := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, infoText(text)); err != nil {
 		logEnqueueError(bot, msg.Chat.ID, err)
 	}
+}
+
+func handleInstallVersionMessage(out *outbox.Store, bot *tg.Client, msg tg.Message, tag string) {
+	if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, "⏳ installing "+tag+"..."); err != nil {
+		logEnqueueError(bot, msg.Chat.ID, err)
+	}
+	flushOutbox(out)
+	if err := installRelease(tag); err != nil {
+		if enqueueErr := out.EnqueueReply(msg.Chat.ID, msg.MessageID, errorText(err.Error())); enqueueErr != nil {
+			logEnqueueError(bot, msg.Chat.ID, enqueueErr)
+		}
+		flushOutbox(out)
+	}
+}
+
+func isVersionCommand(cmd string) bool {
+	if !strings.HasPrefix(cmd, "v") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(cmd, "v"), "_")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func tagFromVersionCommand(cmd string) string {
+	return "v" + strings.ReplaceAll(strings.TrimPrefix(cmd, "v"), "_", ".")
 }
 
 func logEnqueueError(bot *tg.Client, chatID int64, err error) {

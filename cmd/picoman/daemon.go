@@ -236,8 +236,14 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	var reply string
 	var err error
 	replyHTML := false
+	cmd := commandName(fields[0])
 
-	switch commandName(fields[0]) {
+	if isVersionCommand(cmd) {
+		go handleInstallVersionMessage(out, bot, msg, tagFromVersionCommand(cmd))
+		return
+	}
+
+	switch cmd {
 	case "start", "help":
 		reply = infoText(botHelpText())
 	case "status":
