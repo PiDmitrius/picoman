@@ -81,15 +81,15 @@ func runDaemon() {
 
 	marker := readRestartMarker()
 	if marker.Reason == "update" {
-		notifyUsers(out, cfg, bot, infoText(updateLifecycleText(marker)))
+		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
 	} else {
-		notifyUsers(out, cfg, bot, infoText(lifecycleText("started", cleanup)))
+		notify(out, cfg, bot, false, infoText(lifecycleText("started", cleanup)))
 	}
 	if autoUnsealed {
-		notifyUsers(out, cfg, bot, unsealText())
+		notify(out, cfg, bot, false, unsealText())
 	}
 	if autoUnsealErr != nil {
-		notifyUsers(out, cfg, bot, errorText("unseal failed: "+autoUnsealErr.Error()))
+		notify(out, cfg, bot, false, errorText("unseal failed: "+autoUnsealErr.Error()))
 	}
 
 	offset := int64(0)
@@ -113,7 +113,7 @@ func runDaemon() {
 	}
 
 	cleanup = st.CleanStart()
-	notifyUsers(out, cfg, bot, infoText(lifecycleText("stopped", cleanup)))
+	notify(out, cfg, bot, false, infoText(lifecycleText("stopped", cleanup)))
 	flushOutbox(out)
 	stopOutbox()
 }
@@ -133,18 +133,15 @@ func updateLifecycleText(marker restartMarker) string {
 	return "picoman " + version + " updated"
 }
 
-func notifyUsers(out *outbox.Store, cfg *config.Config, bot *tg.Client, text string) {
-	for _, userID := range cfg.AllowedUsers {
-		if err := out.Enqueue(userID, text); err != nil {
-			log.Printf("enqueue notify user=%d: %v", userID, err)
-			go criticalNotifyUser(userID, bot, "outbox", err)
-		}
+// notify broadcasts text to all allowed users through the outbox.
+// On enqueue failure (outbox itself broken) falls back to direct send.
+func notify(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, text string) {
+	enqueue := out.Enqueue
+	if html {
+		enqueue = out.EnqueueHTML
 	}
-}
-
-func notifyUsersHTML(out *outbox.Store, cfg *config.Config, bot *tg.Client, text string) {
 	for _, userID := range cfg.AllowedUsers {
-		if err := out.EnqueueHTML(userID, text); err != nil {
+		if err := enqueue(userID, text); err != nil {
 			log.Printf("enqueue notify user=%d: %v", userID, err)
 			go criticalNotifyUser(userID, bot, "outbox", err)
 		}
@@ -157,6 +154,8 @@ func criticalNotifyUsers(cfg *config.Config, bot *tg.Client, name string, err er
 	}
 }
 
+// criticalNotifyUser sends a direct (non-outbox) message and retries forever.
+// Used only when the outbox itself failed and we need to bypass it.
 func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
 	text := "❌ " + name + " error: " + shortError(err)
 	for {
@@ -211,9 +210,9 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 			continue
 		}
 		if err := st.Lock(); err != nil {
-			notifyUsers(out, cfg, bot, errorText("lock failed: "+err.Error()))
+			notify(out, cfg, bot, false, errorText("lock failed: "+err.Error()))
 		} else {
-			notifyUsers(out, cfg, bot, "🔒 locked")
+			notify(out, cfg, bot, false, "🔒 locked")
 		}
 		activeUntil = time.Time{}
 	}
@@ -953,11 +952,12 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 	return out, nil
 }
 
-func sshArgs(t config.Target, knownHosts string) []string {
+// sshCommonOpts builds the options shared by ssh and scp.
+// The port flag differs (-p for ssh, -P for scp) so callers add it.
+func sshCommonOpts(t config.Target, knownHosts string) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=no",
-		"-p", fmt.Sprint(targetPort(t)),
 	}
 	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
 		args = append(args,
@@ -970,21 +970,12 @@ func sshArgs(t config.Target, knownHosts string) []string {
 	return args
 }
 
+func sshArgs(t config.Target, knownHosts string) []string {
+	return append(sshCommonOpts(t, knownHosts), "-p", fmt.Sprint(targetPort(t)))
+}
+
 func scpArgs(t config.Target, knownHosts string) []string {
-	args := []string{
-		"-o", "BatchMode=yes",
-		"-o", "IdentitiesOnly=no",
-		"-P", fmt.Sprint(targetPort(t)),
-	}
-	if knownHosts != "" && strings.TrimSpace(t.PublicKey) != "" {
-		args = append(args,
-			"-o", "UserKnownHostsFile="+knownHosts,
-			"-o", "StrictHostKeyChecking=yes",
-		)
-	} else {
-		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
-	}
-	return args
+	return append(sshCommonOpts(t, knownHosts), "-P", fmt.Sprint(targetPort(t)))
 }
 
 func targetPort(t config.Target) int {

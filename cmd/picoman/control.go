@@ -64,20 +64,20 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		if err := st.Unseal(string(data)); err != nil {
-			notifyUsers(out, cfg, bot, errorText("unseal failed: "+err.Error()))
+			notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, unsealText())
+		notify(out, cfg, bot, false, unsealText())
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
 		if err := st.Lock(); err != nil {
-			notifyUsers(out, cfg, bot, errorText("seal failed: "+err.Error()))
+			notify(out, cfg, bot, false, errorText("seal failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
 		st.Seal()
-		notifyUsers(out, cfg, bot, "⚪ sealed")
+		notify(out, cfg, bot, false, "⚪ sealed")
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "ASKPASS":
 		passphrase := st.Passphrase()
@@ -94,19 +94,19 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			return
 		}
 		if err := st.Unlock(ttl); err != nil {
-			notifyUsers(out, cfg, bot, errorText("unlock failed: "+err.Error()))
+			notify(out, cfg, bot, false, errorText("unlock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, "🟡 unlocked ("+leftText(st.Until())+")")
+		notify(out, cfg, bot, false, "🟡 unlocked ("+leftText(st.Until())+")")
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "LOCK":
 		if err := st.Lock(); err != nil {
-			notifyUsers(out, cfg, bot, errorText("lock failed: "+err.Error()))
+			notify(out, cfg, bot, false, errorText("lock failed: "+err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, "🔒 locked")
+		notify(out, cfg, bot, false, "🔒 locked")
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "LOGLEVEL "):
 		level := strings.TrimPrefix(line, "LOGLEVEL ")
@@ -114,7 +114,7 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR bad loglevel\n")
 			return
 		}
-		notifyUsers(out, cfg, bot, "⚙️ loglevel "+level)
+		notify(out, cfg, bot, false, "⚙️ loglevel "+level)
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "RUN "):
 		parts := strings.SplitN(strings.TrimPrefix(line, "RUN "), " ", 2)
@@ -129,14 +129,14 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		output, err := runTarget(context.Background(), cfg, st, parts[0], string(command))
 		if err != nil {
-			notifyUsersHTML(out, cfg, bot, runErrorText(parts[0], string(command), err.Error()))
+			notify(out, cfg, bot, true, runErrorText(parts[0], string(command), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
 		if audit.LogLevel() == "all" {
-			notifyUsersHTML(out, cfg, bot, runText(parts[0], string(command), output))
+			notify(out, cfg, bot, true, runText(parts[0], string(command), output))
 		} else {
-			notifyUsersHTML(out, cfg, bot, actionText("▶️ run", parts[0]))
+			notify(out, cfg, bot, true, actionText("▶️ run", parts[0]))
 		}
 		_, _ = io.WriteString(conn, "OK "+base64.StdEncoding.EncodeToString([]byte(output))+"\n")
 	case strings.HasPrefix(line, "GET "):
@@ -157,11 +157,11 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyFromTarget(context.Background(), cfg, st, parts[0], string(remoteName), string(localName))
 		if err != nil {
-			notifyUsersHTML(out, cfg, bot, transferErrorText("⬅️ get", parts[0], string(remoteName), string(localName), err.Error()))
+			notify(out, cfg, bot, true, transferErrorText("⬅️ get", parts[0], string(remoteName), string(localName), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsersHTML(out, cfg, bot, transferText("⬅️ get", parts[0], string(remoteName), string(localName)))
+		notify(out, cfg, bot, true, transferText("⬅️ get", parts[0], string(remoteName), string(localName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	case strings.HasPrefix(line, "PUT "):
 		parts := strings.Split(strings.TrimPrefix(line, "PUT "), " ")
@@ -181,11 +181,11 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 		}
 		err = copyToTarget(context.Background(), cfg, st, parts[0], string(localName), string(remoteName))
 		if err != nil {
-			notifyUsersHTML(out, cfg, bot, transferErrorText("➡️ put", parts[0], string(localName), string(remoteName), err.Error()))
+			notify(out, cfg, bot, true, transferErrorText("➡️ put", parts[0], string(localName), string(remoteName), err.Error()))
 			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 			return
 		}
-		notifyUsersHTML(out, cfg, bot, transferText("➡️ put", parts[0], string(localName), string(remoteName)))
+		notify(out, cfg, bot, true, transferText("➡️ put", parts[0], string(localName), string(remoteName)))
 		_, _ = io.WriteString(conn, "OK\n")
 	default:
 		_, _ = io.WriteString(conn, "ERR unknown command\n")
@@ -193,7 +193,6 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 }
 
 func runUnseal(args []string) {
-	cfg := loadConfigOrExit()
 	passphrase, err := readPassphrase(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -203,23 +202,11 @@ func runUnseal(args []string) {
 		fmt.Fprintln(os.Stderr, "empty passphrase")
 		os.Exit(1)
 	}
-	resp, err := controlRequest(cfg.ControlSocket, "UNSEAL "+base64.StdEncoding.EncodeToString([]byte(passphrase)))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
+	simpleControl("UNSEAL " + base64.StdEncoding.EncodeToString([]byte(passphrase)))
 }
 
-func runSeal() {
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "SEAL")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
-}
+func runSeal() { simpleControl("SEAL") }
+func runLock() { simpleControl("LOCK") }
 
 func runUnlock(args []string) {
 	if len(args) > 1 {
@@ -230,23 +217,7 @@ func runUnlock(args []string) {
 	if len(args) == 1 {
 		ttl = args[0]
 	}
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "UNLOCK "+ttl)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
-}
-
-func runLock() {
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "LOCK")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
+	simpleControl("UNLOCK " + ttl)
 }
 
 func runLocalRun(args []string) {
@@ -254,13 +225,8 @@ func runLocalRun(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
 		os.Exit(1)
 	}
-	cfg := loadConfigOrExit()
 	command := strings.Join(args[1:], " ")
-	resp, err := controlRequest(cfg.ControlSocket, "RUN "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(command)))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	resp := requestControl("RUN " + args[0] + " " + base64.StdEncoding.EncodeToString([]byte(command)))
 	if strings.HasPrefix(resp, "ERR ") {
 		fmt.Print(resp)
 		os.Exit(1)
@@ -283,13 +249,9 @@ func runLocalGet(args []string) {
 	if len(args) == 3 {
 		localName = args[2]
 	}
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "GET "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(localName)))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
+	simpleControl("GET " + args[0] + " " +
+		base64.StdEncoding.EncodeToString([]byte(args[1])) + " " +
+		base64.StdEncoding.EncodeToString([]byte(localName)))
 }
 
 func runLocalPut(args []string) {
@@ -301,13 +263,9 @@ func runLocalPut(args []string) {
 	if len(args) == 3 {
 		remoteName = args[2]
 	}
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "PUT "+args[0]+" "+base64.StdEncoding.EncodeToString([]byte(args[1]))+" "+base64.StdEncoding.EncodeToString([]byte(remoteName)))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
+	simpleControl("PUT " + args[0] + " " +
+		base64.StdEncoding.EncodeToString([]byte(args[1])) + " " +
+		base64.StdEncoding.EncodeToString([]byte(remoteName)))
 }
 
 func runLogLevel(args []string) {
@@ -315,13 +273,7 @@ func runLogLevel(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman loglevel <chat|all>")
 		os.Exit(1)
 	}
-	cfg := loadConfigOrExit()
-	resp, err := controlRequest(cfg.ControlSocket, "LOGLEVEL "+args[0])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	printControlResponse(resp)
+	simpleControl("LOGLEVEL " + args[0])
 }
 
 func runAskpass() {
@@ -331,6 +283,22 @@ func runAskpass() {
 		os.Exit(1)
 	}
 	fmt.Print(resp)
+}
+
+// requestControl sends one line and returns the response, exiting on transport error.
+func requestControl(line string) string {
+	cfg := loadConfigOrExit()
+	resp, err := controlRequest(cfg.ControlSocket, line)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return resp
+}
+
+// simpleControl sends one line and prints the response, exiting non-zero on ERR.
+func simpleControl(line string) {
+	printControlResponse(requestControl(line))
 }
 
 func controlRequest(socket, line string) (string, error) {
