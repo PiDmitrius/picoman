@@ -15,13 +15,20 @@ import (
 )
 
 type State struct {
-	mu         sync.Mutex
+	// Immutable after New().
+	socket  string
+	pidPath string
+	keyPath string
+	maxTTL  time.Duration
+
+	// ioMu serializes ssh-agent/ssh-add invocations so state-getters
+	// (Sealed, IsUnlocked, Until) do not block on external I/O.
+	ioMu sync.Mutex
+
+	// stateMu protects the mutable fields below.
+	stateMu    sync.RWMutex
 	pid        int
 	until      time.Time
-	socket     string
-	pidPath    string
-	keyPath    string
-	maxTTL     time.Duration
 	passphrase string
 	startedAt  time.Time
 }
@@ -37,18 +44,21 @@ func New(socket, keyPath string, maxTTL time.Duration) *State {
 }
 
 func (s *State) CleanStart() CleanResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 
-	result := CleanResult{
-		Agent:   s.killOldAgent(),
-		Socket:  removeStatus(s.socket),
-		PIDFile: removeStatus(s.pidPath),
-	}
+	agentStatus := s.killOldAgent()
+
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.pid = 0
 	s.until = time.Time{}
 	s.passphrase = ""
-	return result
+	return CleanResult{
+		Agent:   agentStatus,
+		Socket:  removeStatus(s.socket),
+		PIDFile: removeStatus(s.pidPath),
+	}
 }
 
 func (r CleanResult) OK() bool {
@@ -65,8 +75,8 @@ func (s *State) Unseal(passphrase string) error {
 	if err := s.verifyPassphrase(passphrase); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.passphrase = passphrase
 	return nil
 }
@@ -95,54 +105,49 @@ func (s *State) verifyPassphrase(passphrase string) error {
 }
 
 func (s *State) Seal() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.passphrase = ""
 }
 
 func (s *State) Passphrase() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	return s.passphrase
 }
 
 func (s *State) Sealed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	return s.passphrase == ""
 }
 
 func (s *State) Unlock(ttl time.Duration) error {
-	s.mu.Lock()
 	if s.keyPath == "" {
-		s.mu.Unlock()
 		return fmt.Errorf("key_path is empty")
 	}
-	if s.passphrase == "" {
-		s.mu.Unlock()
-		return fmt.Errorf("sealed")
-	}
 	if ttl <= 0 {
-		s.mu.Unlock()
 		return fmt.Errorf("ttl must be positive")
 	}
 	if ttl > s.maxTTL {
-		s.mu.Unlock()
 		return fmt.Errorf("ttl exceeds max %s", s.maxTTL)
 	}
-	if err := s.ensureAgentLocked(); err != nil {
-		s.mu.Unlock()
+	if s.Sealed() {
+		return fmt.Errorf("sealed")
+	}
+
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
+	if err := s.ensureAgent(); err != nil {
 		return err
 	}
-	socket := s.socket
-	keyPath := s.keyPath
-	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ssh-add", "-t", strconv.Itoa(int(ttl.Seconds())), keyPath)
-	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+socket)
+	cmd := exec.CommandContext(ctx, "ssh-add", "-t", strconv.Itoa(int(ttl.Seconds())), s.keyPath)
+	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+s.socket)
 	askpass, cleanup, err := makeAskpass()
 	if err != nil {
 		return err
@@ -167,9 +172,9 @@ func (s *State) Unlock(ttl time.Duration) error {
 		return fmt.Errorf("ssh-add: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	s.mu.Lock()
+	s.stateMu.Lock()
 	s.until = time.Now().Add(ttl)
-	s.mu.Unlock()
+	s.stateMu.Unlock()
 	return nil
 }
 
@@ -201,8 +206,12 @@ func makeAskpass() (string, func(), error) {
 }
 
 func (s *State) Lock() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
+	s.stateMu.RLock()
+	pid := s.pid
+	s.stateMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -212,26 +221,28 @@ func (s *State) Lock() error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil && s.pid != 0 {
+	if err := cmd.Run(); err != nil && pid != 0 {
 		return fmt.Errorf("ssh-add -D: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	s.killOldAgent()
 	_ = os.Remove(s.socket)
 	_ = os.Remove(s.pidPath)
+	s.stateMu.Lock()
 	s.pid = 0
 	s.until = time.Time{}
+	s.stateMu.Unlock()
 	return nil
 }
 
 func (s *State) IsUnlocked() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	return s.pid != 0 && time.Now().Before(s.until)
 }
 
 func (s *State) Until() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	return s.until
 }
 
@@ -239,8 +250,13 @@ func (s *State) Socket() string {
 	return s.socket
 }
 
-func (s *State) ensureAgentLocked() error {
-	if s.pid != 0 {
+// ensureAgent starts ssh-agent if not already running.
+// Caller must hold ioMu.
+func (s *State) ensureAgent() error {
+	s.stateMu.RLock()
+	pid := s.pid
+	s.stateMu.RUnlock()
+	if pid != 0 {
 		return nil
 	}
 
@@ -261,19 +277,24 @@ func (s *State) ensureAgentLocked() error {
 		return fmt.Errorf("ssh-agent: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	pid, err := parseAgentPID(stdout.String())
+	newPID, err := parseAgentPID(stdout.String())
 	if err != nil {
 		return err
 	}
 
-	s.pid = pid
+	s.stateMu.Lock()
+	s.pid = newPID
 	s.startedAt = time.Now()
-	_ = os.WriteFile(s.pidPath, []byte(strconv.Itoa(pid)), 0o600)
+	s.stateMu.Unlock()
+	_ = os.WriteFile(s.pidPath, []byte(strconv.Itoa(newPID)), 0o600)
 	return nil
 }
 
+// killOldAgent stops any tracked ssh-agent. Caller must hold ioMu.
 func (s *State) killOldAgent() string {
+	s.stateMu.RLock()
 	pid := s.pid
+	s.stateMu.RUnlock()
 	if pid == 0 {
 		data, err := os.ReadFile(s.pidPath)
 		if err == nil {
