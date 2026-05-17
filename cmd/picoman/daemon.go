@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -434,17 +435,18 @@ func leftText(until time.Time) string {
 }
 
 func hostsText(cfg *config.Config) string {
-	if len(cfg.Targets) == 0 {
+	targets := cfg.AllTargets()
+	if len(targets) == 0 {
 		return "host list empty"
 	}
-	names := make([]string, 0, len(cfg.Targets))
-	for name := range cfg.Targets {
+	names := make([]string, 0, len(targets))
+	for name := range targets {
 		names = append(names, name)
 	}
-	sortStrings(names)
+	sort.Strings(names)
 	lines := []string{"host list"}
 	for _, name := range names {
-		lines = append(lines, hostListLine(name, cfg.Targets[name]))
+		lines = append(lines, hostListLine(name, targets[name]))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -461,7 +463,7 @@ func handleHost(fields []string, cfg *config.Config) (string, error) {
 		return "<pre><code>" + html.EscapeString(line) + "</code></pre>", nil
 	}
 	if len(fields) == 2 {
-		target, ok := cfg.Targets[fields[1]]
+		target, ok := cfg.Target(fields[1])
 		if !ok {
 			return "", fmt.Errorf("unknown host %q", fields[1])
 		}
@@ -557,10 +559,7 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 	if _, err := publicKeyFingerprint(publicKey); err != nil {
 		return "", err
 	}
-	if cfg.Targets == nil {
-		cfg.Targets = map[string]config.Target{}
-	}
-	existing := cfg.Targets[name]
+	existing, _ := cfg.Target(name)
 	target := config.Target{
 		User:      user,
 		Host:      host,
@@ -568,11 +567,7 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		PublicKey: publicKey,
 		Note:      existing.Note,
 	}
-	if err := config.ValidateTarget(name, target); err != nil {
-		return "", err
-	}
-	cfg.Targets[name] = target
-	if err := config.SaveHostDB(cfg); err != nil {
+	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
 	}
 	fp, _ := publicKeyFingerprint(publicKey)
@@ -591,13 +586,8 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 		return "", errors.New("usage: host note <name> [note]")
 	}
 	name := fields[0]
-	target, ok := cfg.Targets[name]
-	if !ok {
-		return "", fmt.Errorf("unknown host %q", name)
-	}
-	target.Note = strings.Join(fields[1:], " ")
-	cfg.Targets[name] = target
-	if err := config.SaveHostDB(cfg); err != nil {
+	target, err := cfg.SetHostNote(name, strings.Join(fields[1:], " "))
+	if err != nil {
 		return "", err
 	}
 	if target.Note == "" {
@@ -663,14 +653,6 @@ func remoteShellQuote(s string) string {
 	return shellQuote(s)
 }
 
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
-}
-
 func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
 	if len(fields) < 3 {
 		return "", errors.New("usage: /run <target> <command>")
@@ -726,7 +708,7 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 }
 
 func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, string, error) {
-	t, ok := cfg.Targets[name]
+	t, ok := cfg.Target(name)
 	if !ok {
 		return config.Target{}, "", fmt.Errorf("unknown target %q", name)
 	}
@@ -745,7 +727,7 @@ func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Targ
 
 func writeKnownHosts(cfg *config.Config) (string, error) {
 	var lines []string
-	for _, target := range cfg.Targets {
+	for _, target := range cfg.AllTargets() {
 		key := strings.TrimSpace(target.PublicKey)
 		if key == "" || target.Disabled {
 			continue

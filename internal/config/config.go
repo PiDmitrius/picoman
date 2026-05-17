@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -37,6 +39,64 @@ type Config struct {
 	RemoteWorkDir string            `json:"remote_work_dir"`
 	LogLevel      string            `json:"loglevel"`
 	Targets       map[string]Target `json:"targets"`
+
+	mu sync.RWMutex
+}
+
+func (c *Config) Target(name string) (Target, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	t, ok := c.Targets[name]
+	return t, ok
+}
+
+func (c *Config) HostNames() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	names := make([]string, 0, len(c.Targets))
+	for name := range c.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (c *Config) AllTargets() map[string]Target {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]Target, len(c.Targets))
+	for k, v := range c.Targets {
+		out[k] = v
+	}
+	return out
+}
+
+func (c *Config) UpsertTarget(name string, t Target) error {
+	if err := ValidateTarget(name, t); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Targets == nil {
+		c.Targets = map[string]Target{}
+	}
+	c.Targets[name] = t
+	return saveHostDBLocked(c)
+}
+
+func (c *Config) SetHostNote(name, note string) (Target, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.Targets[name]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown host %q", name)
+	}
+	t.Note = note
+	c.Targets[name] = t
+	if err := saveHostDBLocked(c); err != nil {
+		return Target{}, err
+	}
+	return t, nil
 }
 
 func Dir() string {
@@ -87,7 +147,7 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, err
 	}
-	return normalize(&c), nil
+	return normalize(&c)
 }
 
 func Save(c *Config) error {
@@ -95,7 +155,11 @@ func Save(c *Config) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(normalize(c), "", "  ")
+	norm, err := normalize(c)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(norm, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -129,7 +193,8 @@ func LoadHostDB(c *Config) error {
 	return nil
 }
 
-func SaveHostDB(c *Config) error {
+// saveHostDBLocked writes the host DB. Caller must hold c.mu.
+func saveHostDBLocked(c *Config) error {
 	if c.HostDB == "" {
 		return fmt.Errorf("host_db is empty")
 	}
@@ -184,7 +249,7 @@ func AllowedSet(c *Config) map[int64]bool {
 	return out
 }
 
-func normalize(c *Config) *Config {
+func normalize(c *Config) (*Config, error) {
 	if c == nil {
 		c = Default()
 	}
@@ -207,8 +272,12 @@ func normalize(c *Config) *Config {
 	if c.RemoteWorkDir == "" {
 		c.RemoteWorkDir = def.RemoteWorkDir
 	}
-	if c.LogLevel != "all" {
+	switch c.LogLevel {
+	case "":
 		c.LogLevel = def.LogLevel
+	case "chat", "all":
+	default:
+		return nil, fmt.Errorf("invalid log level %q", c.LogLevel)
 	}
 	if c.Targets == nil {
 		c.Targets = map[string]Target{}
@@ -216,7 +285,7 @@ func normalize(c *Config) *Config {
 	if c.AllowedUsers == nil {
 		c.AllowedUsers = []int64{}
 	}
-	return c
+	return c, nil
 }
 
 var (
