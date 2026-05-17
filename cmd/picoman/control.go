@@ -44,14 +44,16 @@ func (s *controlServer) handlers() map[string]controlHandler {
 		return func(_ context.Context, a [][]byte) ([]byte, error) { return fn(a) }
 	}
 	return map[string]controlHandler{
-		"UNSEAL":   bind(s.unseal),
-		"SEAL":     bind(s.seal),
-		"UNLOCK":   bind(s.unlock),
-		"LOCK":     bind(s.lock),
-		"LOGLEVEL": bind(s.loglevel),
-		"RUN":      s.run,
-		"GET":      s.get,
-		"PUT":      s.put,
+		"UNSEAL":    bind(s.unseal),
+		"SEAL":      bind(s.seal),
+		"UNLOCK":    bind(s.unlock),
+		"LOCK":      bind(s.lock),
+		"LOGLEVEL":  bind(s.loglevel),
+		"RUN":       s.run,
+		"GET":       s.get,
+		"PUT":       s.put,
+		"HOST_ADD":  bind(s.hostAdd),
+		"HOST_NOTE": bind(s.hostNote),
 	}
 }
 
@@ -224,7 +226,12 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([]byte, error) 
 	host, command := string(args[0]), string(args[1])
 	output, err := runTarget(ctx, s.cfg, s.st, host, command)
 	if err != nil {
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, err.Error()))
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
+		// Surface partial output to the CLI via the error reason so the
+		// caller sees more than just "ssh: exit status N".
+		if output != "" {
+			return nil, fmt.Errorf("%s\n%s", err, output)
+		}
 		return nil, err
 	}
 	if s.audit.LogLevel() == "all" {
@@ -245,6 +252,32 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([]byte, error) 
 		return nil, err
 	}
 	notify(s.out, s.cfg, s.bot, true, transferText("⬅️ get", host, remote, local))
+	return nil, nil
+}
+
+func (s *controlServer) hostAdd(args [][]byte) ([]byte, error) {
+	if len(args) != 4 {
+		return nil, errors.New("usage: HOST_ADD <name> <user>@<host>:<port> <keytype> <key>")
+	}
+	fields := []string{string(args[0]), string(args[1]), string(args[2]), string(args[3])}
+	if _, err := addHostFromFields(fields, s.cfg); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (s *controlServer) hostNote(args [][]byte) ([]byte, error) {
+	if len(args) < 1 {
+		return nil, errors.New("usage: HOST_NOTE <name> [note]")
+	}
+	name := string(args[0])
+	note := ""
+	if len(args) >= 2 {
+		note = string(args[1])
+	}
+	if _, err := s.cfg.SetHostNote(name, note); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
@@ -336,6 +369,96 @@ func runLogLevel(args []string) {
 		os.Exit(1)
 	}
 	simpleControl("LOGLEVEL", args[0])
+}
+
+func runHost(args []string) {
+	if len(args) == 0 {
+		runHostList()
+		return
+	}
+	switch args[0] {
+	case "list":
+		runHostList()
+	case "add":
+		runHostAdd(args[1:])
+	case "note":
+		runHostNote(args[1:])
+	default:
+		runHostShow(args[0])
+	}
+}
+
+// loadHosts returns config with hosts.json loaded. Reads disk directly — the
+// daemon writes via atomic rename, so readers always see a consistent snapshot.
+func loadHosts() *config.Config {
+	cfg := loadConfigOrExit()
+	if err := config.LoadHostDB(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "load host db: %v\n", err)
+		os.Exit(1)
+	}
+	return cfg
+}
+
+func runHostList() {
+	cfg := loadHosts()
+	names := cfg.HostNames()
+	if len(names) == 0 {
+		fmt.Println("(no hosts)")
+		return
+	}
+	for _, n := range names {
+		t, _ := cfg.Target(n)
+		line := n
+		if t.Note != "" {
+			line += "  " + t.Note
+		}
+		if t.Disabled {
+			line += "  (disabled)"
+		}
+		fmt.Println(line)
+	}
+}
+
+func runHostShow(name string) {
+	cfg := loadHosts()
+	t, ok := cfg.Target(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown host %q\n", name)
+		os.Exit(1)
+	}
+	port := t.Port
+	if port == 0 {
+		port = 22
+	}
+	fmt.Printf("%s\n%s@%s:%d\n", name, t.User, t.Host, port)
+	if t.Note != "" {
+		fmt.Println(t.Note)
+	}
+	if t.Disabled {
+		fmt.Println("(disabled)")
+	}
+	if t.WorkDir != "" {
+		fmt.Println("work_dir: " + t.WorkDir)
+	}
+	if t.PublicKey != "" {
+		fmt.Println(t.PublicKey)
+	}
+}
+
+func runHostAdd(args []string) {
+	if len(args) != 4 {
+		fmt.Fprintln(os.Stderr, "usage: picoman host add <name> <user>@<host>:<port> <keytype> <key>")
+		os.Exit(1)
+	}
+	simpleControl("HOST_ADD", args[0], args[1], args[2], args[3])
+}
+
+func runHostNote(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: picoman host note <name> [note]")
+		os.Exit(1)
+	}
+	simpleControl("HOST_NOTE", args[0], strings.Join(args[1:], " "))
 }
 
 func runAskpass() {
