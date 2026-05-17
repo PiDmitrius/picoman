@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -163,10 +166,15 @@ func downloadRelease(tag string) (string, error) {
 		return "", fmt.Errorf("unsupported os %s", runtime.GOOS)
 	}
 	name := fmt.Sprintf("picoman-%s-linux-%s", tag, runtime.GOARCH)
-	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
+	base := fmt.Sprintf("https://github.com/%s/releases/download/%s/", repo, tag)
+
+	expected, err := fetchReleaseSHA256(base + name + ".sha256")
+	if err != nil {
+		return "", fmt.Errorf("fetch sha256: %w", err)
+	}
 
 	fmt.Printf("downloading %s...\n", name)
-	resp, err := http.Get(url)
+	resp, err := http.Get(base + name)
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +187,8 @@ func downloadRelease(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", err
@@ -188,11 +197,48 @@ func downloadRelease(tag string) (string, error) {
 		os.Remove(tmp.Name())
 		return "", err
 	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != expected {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("sha256 mismatch: expected %s, got %s", expected, got)
+	}
+	fmt.Printf("sha256 ok: %s\n", got)
 	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		os.Remove(tmp.Name())
 		return "", err
 	}
 	return tmp.Name(), nil
+}
+
+// fetchReleaseSHA256 returns the lowercase hex sha256 from a sha256sum-format
+// file at url. Format: "<64-hex>  <filename>\n".
+func fetchReleaseSHA256(url string) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return "", errors.New("empty checksum file")
+	}
+	sum := strings.ToLower(fields[0])
+	if len(sum) != 64 {
+		return "", fmt.Errorf("bad checksum length %d", len(sum))
+	}
+	for _, c := range sum {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", errors.New("bad checksum characters")
+		}
+	}
+	return sum, nil
 }
 
 func installBinary(bin, from, to string) error {
