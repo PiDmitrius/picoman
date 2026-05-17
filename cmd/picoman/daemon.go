@@ -56,9 +56,13 @@ func runDaemon() {
 	st := agent.New(cfg.AgentSocket, cfg.KeyPath, config.MaxTTL(cfg))
 	cleanup := st.CleanStart()
 	autoUnsealed := false
+	var autoUnsealErr error
 	if cfg.KeyPassphrase != "" {
-		st.Unseal(cfg.KeyPassphrase)
-		autoUnsealed = true
+		if err := st.Unseal(cfg.KeyPassphrase); err != nil {
+			autoUnsealErr = err
+		} else {
+			autoUnsealed = true
+		}
 	}
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
@@ -82,6 +86,9 @@ func runDaemon() {
 	}
 	if autoUnsealed {
 		notifyUsers(out, cfg, bot, unsealText())
+	}
+	if autoUnsealErr != nil {
+		notifyUsers(out, cfg, bot, errorText("unseal failed: "+autoUnsealErr.Error()))
 	}
 
 	offset := int64(0)
@@ -242,6 +249,11 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		reply = infoText(hostsText(cfg))
 		replyHTML = true
 	case "host":
+		if len(fields) == 2 && fields[1] == "list" {
+			reply = infoText(hostsText(cfg))
+			replyHTML = true
+			break
+		}
 		reply, err = handleHost(fields, cfg)
 		if err == nil {
 			replyHTML = true
@@ -361,7 +373,7 @@ commands:
 /lock
 /status
 /update
-/hosts
+/host list
 /host <name>
 /host add
 /run <target> <command>
@@ -416,14 +428,14 @@ func leftText(until time.Time) string {
 
 func hostsText(cfg *config.Config) string {
 	if len(cfg.Targets) == 0 {
-		return "hosts empty"
+		return "host list empty"
 	}
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
 		names = append(names, hostNameText(name))
 	}
 	sortStrings(names)
-	return "hosts\n" + strings.Join(names, "\n")
+	return "host list\n" + strings.Join(names, "\n")
 }
 
 func handleHost(fields []string, cfg *config.Config) (string, error) {

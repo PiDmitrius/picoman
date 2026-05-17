@@ -63,7 +63,11 @@ func handleControl(conn net.Conn, cfg *config.Config, st *agent.State, out *outb
 			_, _ = io.WriteString(conn, "ERR bad secret\n")
 			return
 		}
-		st.Unseal(string(data))
+		if err := st.Unseal(string(data)); err != nil {
+			notifyUsers(out, cfg, bot, errorText("unseal failed: "+err.Error()))
+			_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
+			return
+		}
 		notifyUsers(out, cfg, bot, unsealText())
 		_, _ = io.WriteString(conn, "OK\n")
 	case line == "SEAL":
