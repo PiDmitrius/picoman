@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.67"
+const version = "v0.1.68"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -47,6 +47,8 @@ func main() {
 		runLocalPut(os.Args[2:])
 	case "loglevel":
 		runLogLevel(os.Args[2:])
+	case "host":
+		runHost(os.Args[2:])
 	case "askpass":
 		runAskpass()
 	case "update":
@@ -75,6 +77,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  run         Run command on a configured target")
 	fmt.Fprintln(os.Stderr, "  get         Copy remote work file into local work directory")
 	fmt.Fprintln(os.Stderr, "  put         Copy local work file into target work directory")
+	fmt.Fprintln(os.Stderr, "  host        List, show, add, or annotate target hosts")
 	fmt.Fprintln(os.Stderr, "  loglevel    Set audit log level: chat or all")
 	fmt.Fprintln(os.Stderr, "  stop        Stop the service")
 	fmt.Fprintln(os.Stderr, "  restart     Restart the service")

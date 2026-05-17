@@ -407,17 +407,17 @@ func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
-	text, err := handleRun(c.ctx, c.cfg, c.st, fields)
-	if err == nil {
-		return cmdReply{text: text, html: true}, nil
-	}
-	if len(fields) < 3 {
+	output, command, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	if command == "" {
 		return cmdReply{html: true}, err
 	}
-	return cmdReply{
-		text: runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error()),
-		html: true,
-	}, err
+	if err != nil {
+		return cmdReply{
+			text: runErrorText(fields[1], command, output, err.Error()),
+			html: true,
+		}, err
+	}
+	return cmdReply{text: runText(fields[1], command, output), html: true}, nil
 }
 
 func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
@@ -708,17 +708,16 @@ func remoteShellQuote(s string) string {
 	return shellQuote(s)
 }
 
-func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+// handleRun returns whatever ssh captured (stdout+stderr) even on remote
+// failure, so callers can surface partial output instead of just the exit
+// status. command is "" only when usage validation failed.
+func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (output, command string, err error) {
 	if len(fields) < 3 {
-		return "", errors.New("usage: /run <target> <command>")
+		return "", "", errors.New("usage: /run <target> <command>")
 	}
-
-	remoteCommand := strings.Join(fields[2:], " ")
-	out, err := runTarget(ctx, cfg, st, fields[1], remoteCommand)
-	if err != nil {
-		return "", err
-	}
-	return runText(fields[1], remoteCommand, out), nil
+	command = strings.Join(fields[2:], " ")
+	output, err = runTarget(ctx, cfg, st, fields[1], command)
+	return output, command, err
 }
 
 func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -1006,9 +1005,13 @@ func runText(target, command, output string) string {
 		"\n<pre><code>" + escapedCodeBlock(output, maxOutputBytes) + "</code></pre>"
 }
 
-func runErrorText(target, command, reason string) string {
-	return actionErrorText("▶️ run", target, reason) +
+func runErrorText(target, command, output, reason string) string {
+	text := actionErrorText("▶️ run", target, reason) +
 		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
+	if output != "" {
+		text += "\n<pre><code>" + escapedCodeBlock(output, maxOutputBytes) + "</code></pre>"
+	}
+	return text
 }
 
 func actionText(action, target string) string {
