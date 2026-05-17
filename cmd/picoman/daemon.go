@@ -956,6 +956,7 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 // The port flag differs (-p for ssh, -P for scp) so callers add it.
 func sshCommonOpts(t config.Target, knownHosts string) []string {
 	args := []string{
+		"-F", "/dev/null",
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=no",
 	}
