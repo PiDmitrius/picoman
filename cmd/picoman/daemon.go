@@ -242,52 +242,14 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 			reply = "🔒 locked"
 		}
 	case "run":
-		reply, err = handleRun(ctx, cfg, st, fields)
-		if err == nil {
-			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
-				log.Printf("enqueue reply: %v", enqueueErr)
-				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-			}
-			return
-		}
-		if len(fields) >= 3 {
-			reply = runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error())
-			replyHTML = true
-		}
+		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
+		return
 	case "get":
-		reply, err = handleGet(ctx, cfg, st, fields)
-		if err == nil {
-			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
-				log.Printf("enqueue reply: %v", enqueueErr)
-				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-			}
-			return
-		}
-		if len(fields) >= 3 {
-			localName := defaultTransferName(fields[2])
-			if len(fields) >= 4 {
-				localName = fields[3]
-			}
-			reply = transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error())
-			replyHTML = true
-		}
+		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
+		return
 	case "put":
-		reply, err = handlePut(ctx, cfg, st, fields)
-		if err == nil {
-			if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
-				log.Printf("enqueue reply: %v", enqueueErr)
-				go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
-			}
-			return
-		}
-		if len(fields) >= 3 {
-			remoteName := defaultTransferName(fields[2])
-			if len(fields) >= 4 {
-				remoteName = fields[3]
-			}
-			reply = transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error())
-			replyHTML = true
-		}
+		go handleAsyncAction(ctx, out, cfg, st, bot, msg, fields)
+		return
 	default:
 		reply = warningText("unknown command\n\n" + botHelpText())
 	}
@@ -311,6 +273,58 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		log.Printf("enqueue reply: %v", enqueueErr)
 		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
 	}
+}
+
+func handleAsyncAction(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message, fields []string) {
+	reply, err := handleAsyncActionReply(ctx, cfg, st, fields)
+	if err != nil {
+		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, msg.Text, err)
+	} else {
+		log.Printf("command ok user=%d command=%q", msg.From.ID, msg.Text)
+	}
+	if enqueueErr := out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, reply); enqueueErr != nil {
+		log.Printf("enqueue reply: %v", enqueueErr)
+		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", enqueueErr)
+	}
+}
+
+func handleAsyncActionReply(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+	switch commandName(fields[0]) {
+	case "run":
+		reply, err := handleRun(ctx, cfg, st, fields)
+		if err == nil || len(fields) < 3 {
+			return replyOrError(reply, err)
+		}
+		return runErrorText(fields[1], strings.Join(fields[2:], " "), err.Error()), err
+	case "get":
+		reply, err := handleGet(ctx, cfg, st, fields)
+		if err == nil || len(fields) < 3 {
+			return replyOrError(reply, err)
+		}
+		localName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			localName = fields[3]
+		}
+		return transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error()), err
+	case "put":
+		reply, err := handlePut(ctx, cfg, st, fields)
+		if err == nil || len(fields) < 3 {
+			return replyOrError(reply, err)
+		}
+		remoteName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			remoteName = fields[3]
+		}
+		return transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error()), err
+	}
+	return errorText("unknown command"), errors.New("unknown command")
+}
+
+func replyOrError(reply string, err error) (string, error) {
+	if err != nil {
+		return errorText(err.Error()), err
+	}
+	return reply, nil
 }
 
 func commandName(s string) string {
@@ -783,9 +797,6 @@ func remoteSpec(t config.Target, remotePath string) string {
 }
 
 func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts string, from string, to string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	args := scpArgs(t, knownHosts)
 	args = append(args, from, to)
 	cmd := exec.CommandContext(ctx, "scp", args...)
@@ -800,9 +811,6 @@ func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts
 }
 
 func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	args := sshArgs(t, knownHosts)
 	args = append(args,
 		t.User+"@"+t.Host,
