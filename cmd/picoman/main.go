@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.82"
+const version = "v0.1.83"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -91,8 +91,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  lock                               Unload SSH key")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Operations (require unlocked key):")
-	fmt.Fprintln(os.Stderr, "  run [--split-streams] <target> <command>...")
-	fmt.Fprintln(os.Stderr, "                                     Run remote command (default merges stdout+stderr in arrival order)")
+	fmt.Fprintln(os.Stderr, "  run <target> <command>...          Run remote command (stdout+stderr merged in arrival order)")
 	fmt.Fprintln(os.Stderr, "  get <target> <remote> [<local>]    Download from target into local work dir")
 	fmt.Fprintln(os.Stderr, "  put <target> <local> [<remote>]    Upload to target work dir")
 	fmt.Fprintln(os.Stderr)
