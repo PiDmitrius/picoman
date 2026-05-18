@@ -170,9 +170,23 @@ func (s *Store) SendOne(ctx context.Context) error {
 		return sendErr
 	}
 
-	var apiErr *tg.APIError
-	permanent := errors.As(sendErr, &apiErr) && !apiErr.IsRetryable()
-	if !permanent {
+	// HTML rejected permanently (e.g. parse_error from a malformed tag in our
+	// own generator): retry once as plain so users see *something* — visible
+	// raw tags beat a dead-lettered message.
+	if msg.format == "html" && isPermanent(sendErr) {
+		plain := msg
+		plain.format = ""
+		if plainErr := s.send(ctx, plain); plainErr == nil {
+			log.Printf("outbox sent (html→plain fallback) id=%d chat=%d: original %v", msg.id, msg.chatID, sendErr)
+			_ = s.clearFormat(msg.id)
+			return s.markSent(msg.id)
+		} else {
+			// Plain also rejected — fall through with the new error.
+			sendErr = plainErr
+		}
+	}
+
+	if !isPermanent(sendErr) {
 		s.recordError(msg.id, sendErr)
 		log.Printf("outbox transient id=%d chat=%d: %v", msg.id, msg.chatID, sendErr)
 		return sendErr
@@ -188,6 +202,11 @@ func (s *Store) SendOne(ctx context.Context) error {
 	}
 	log.Printf("outbox permanent id=%d chat=%d attempts=%d: %v", msg.id, msg.chatID, attempts, sendErr)
 	return sendErr
+}
+
+func isPermanent(err error) bool {
+	var apiErr *tg.APIError
+	return errors.As(err, &apiErr) && !apiErr.IsRetryable()
 }
 
 func (s *Store) send(ctx context.Context, msg message) error {
@@ -273,6 +292,11 @@ func (s *Store) markDead(id int64) {
 
 func (s *Store) clearReplyTo(id int64) error {
 	_, err := s.db.Exec(`update outbox set reply_to_id = 0 where id = ?`, id)
+	return err
+}
+
+func (s *Store) clearFormat(id int64) error {
+	_, err := s.db.Exec(`update outbox set format = '' where id = ?`, id)
 	return err
 }
 
