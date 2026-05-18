@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,6 +30,13 @@ type Store struct {
 	db   *sql.DB
 	bot  *tg.Client
 	done chan struct{} // closed when Run exits
+
+	// alert is a direct-to-user sink for internal outbox issues that we don't
+	// want to route back through the outbox itself (offset persistence
+	// failures, oversize messages, etc.). Set by daemon at startup.
+	alert       func(text string)
+	trimAlerted sync.Once
+	persistAlerted sync.Once
 }
 
 type message struct {
@@ -83,6 +91,9 @@ func (s *Store) enqueue(chatID, replyToID int64, format, text string) error {
 	// than reassemble HTML across chunks (which loses tags and is fragile).
 	if len(text) > maxMessageBytes {
 		log.Printf("outbox message too long (chat=%d format=%q bytes=%d); hard-trimming", chatID, format, len(text))
+		s.trimAlerted.Do(func() {
+			s.fireAlert(fmt.Sprintf("⚠️ outbox hard-trim: message %d bytes (limit %d); producer bug", len(text), maxMessageBytes))
+		})
 		text = trimUTF8(text, maxMessageBytes)
 	}
 	return s.insert(replyToID, chatID, format, text)
@@ -110,6 +121,19 @@ values(?, ?, ?, ?, unixepoch())
 // Done is closed when the Run goroutine has exited. Use it to wait before
 // calling Flush during shutdown so two senders don't pick the same row.
 func (s *Store) Done() <-chan struct{} { return s.done }
+
+// SetAlertSink wires a direct-to-user notification function for internal
+// issues. The sink should bypass this outbox so a broken outbox can still
+// alert. May be nil (alerts then drop to the journal only).
+func (s *Store) SetAlertSink(fn func(text string)) { s.alert = fn }
+
+// fireAlert calls the alert sink if set, otherwise just logs.
+func (s *Store) fireAlert(text string) {
+	log.Printf("outbox alert: %s", text)
+	if s.alert != nil {
+		s.alert(text)
+	}
+}
 
 func (s *Store) Run(ctx context.Context) {
 	defer close(s.done)
@@ -337,6 +361,11 @@ func (s *Store) SetTelegramOffset(offset int64) error {
 		`insert into kv(k, v) values('tg_offset', ?) on conflict(k) do update set v = excluded.v`,
 		strconv.FormatInt(offset, 10),
 	)
+	if err != nil {
+		s.persistAlerted.Do(func() {
+			s.fireAlert("⚠️ outbox cannot persist tg offset: " + err.Error())
+		})
+	}
 	return err
 }
 
