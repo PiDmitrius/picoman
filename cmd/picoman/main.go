@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.73"
+const version = "v0.1.74"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -51,6 +51,8 @@ func main() {
 		runHost(os.Args[2:])
 	case "askpass":
 		runAskpass()
+	case "askpass-tty":
+		runAskpassTTY()
 	case "update":
 		runUpdate()
 	case "fallback":
@@ -76,7 +78,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  version                            Print version")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Key state (daemon required):")
-	fmt.Fprintln(os.Stderr, "  unseal [<passphrase>]              Send key passphrase (default: read from stdin/tty)")
+	fmt.Fprintln(os.Stderr, "  unseal [<passphrase>]              Unseal daemon (arg | piped stdin | configured/default command on tty)")
 	fmt.Fprintln(os.Stderr, "  seal                               Forget key passphrase")
 	fmt.Fprintln(os.Stderr, "  unlock [<ttl>]                     Load SSH key for ttl (default 5m, capped by max_unlock_ttl)")
 	fmt.Fprintln(os.Stderr, "  lock                               Unload SSH key")
@@ -97,6 +99,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Maintenance:")
 	fmt.Fprintln(os.Stderr, "  loglevel <chat|all>                Set audit verbosity")
-	fmt.Fprintln(os.Stderr, "  update                             Update from source_dir or latest GitHub release")
+	fmt.Fprintln(os.Stderr, "  update                             Update from developer_dir or latest GitHub release")
 	fmt.Fprintln(os.Stderr, "  fallback [<tag>]                   Install a specific GitHub release (no tag = list recent)")
 }

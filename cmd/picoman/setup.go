@@ -31,11 +31,10 @@ func runSetup() {
 	cfg.AllowedUsers = promptInt64ListKeep(reader, "Telegram allowed users", cfg.AllowedUsers)
 	cfg.KeyPath = expandPathValue(promptStringKeep(reader, "SSH key path", displayPathValue(cfg.KeyPath)), "")
 	cfg.KeyPassphrase = promptSecretKeep(reader, "SSH key passphrase", cfg.KeyPassphrase)
-	cfg.KeyPassphraseCommand = promptStringKeep(reader, "SSH key passphrase command (stdout = passphrase; takes precedence)", cfg.KeyPassphraseCommand)
+	cfg.KeyPassphraseCommand = promptStringKeep(reader, "SSH key passphrase command (stdout = passphrase)", cfg.KeyPassphraseCommand)
 	cfg.AgentSocket = expandPathValue(promptStringKeep(reader, "SSH agent socket", displayPathValue(cfg.AgentSocket)), "")
 	cfg.ControlSocket = expandPathValue(promptStringKeep(reader, "Control socket", displayPathValue(cfg.ControlSocket)), "")
 	cfg.MaxUnlockTTL = promptDurationKeep(reader, "Max unlock TTL", cfg.MaxUnlockTTL)
-	cfg.SourceDir = expandPathValue(promptStringKeep(reader, "Source directory", displayPathValue(defaultSourceDir(cfg.SourceDir))), "")
 	cfg.HostDB = expandPathValue(promptStringKeep(reader, "Host database", displayPathValue(cfg.HostDB)), "")
 	cfg.WorkDir = expandPathValue(promptStringKeep(reader, "Local work directory", displayPathValue(cfg.WorkDir)), "")
 	cfg.RemoteWorkDir = promptStringKeep(reader, "Remote work directory", cfg.RemoteWorkDir)
@@ -159,17 +158,6 @@ func expandPathValue(path, fallback string) string {
 	default:
 		return path
 	}
-}
-
-func defaultSourceDir(current string) string {
-	if current != "" {
-		return current
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return cwd
 }
 
 func formatInt64List(values []int64) string {

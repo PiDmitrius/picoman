@@ -34,7 +34,7 @@ type Config struct {
 	AgentSocket          string            `json:"agent_socket"`
 	ControlSocket        string            `json:"control_socket"`
 	MaxUnlockTTL         string            `json:"max_unlock_ttl"`
-	SourceDir            string            `json:"source_dir"`
+	DeveloperDir         string            `json:"developer_dir"`
 	HostDB               string            `json:"host_db"`
 	WorkDir              string            `json:"work_dir"`
 	RemoteWorkDir        string            `json:"remote_work_dir"`
@@ -279,6 +279,9 @@ func normalize(c *Config) (*Config, error) {
 	case "chat", "all":
 	default:
 		return nil, fmt.Errorf("invalid log level %q", c.LogLevel)
+	}
+	if c.KeyPassphrase != "" && c.KeyPassphraseCommand != "" {
+		return nil, fmt.Errorf("set exactly one of key_passphrase or key_passphrase_command, not both")
 	}
 	if c.Targets == nil {
 		c.Targets = map[string]Target{}
