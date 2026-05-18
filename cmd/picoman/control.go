@@ -488,11 +488,31 @@ func runHostShow(name string) {
 }
 
 func runHostAdd(args []string) {
-	if len(args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: picoman host add <name> <user>@<host>:<port> <keytype> <key>")
+	switch len(args) {
+	case 0:
+		printBootstrap("")
+	case 1:
+		if !config.ValidName(args[0]) {
+			fmt.Fprintf(os.Stderr, "bad host name %q\n", args[0])
+			os.Exit(1)
+		}
+		printBootstrap(args[0])
+	case 4:
+		simpleControl("HOST_ADD", args[0], args[1], args[2], args[3])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: picoman host add [<name> [<user>@<host>:<port> <keytype> <key>]]")
 		os.Exit(1)
 	}
-	simpleControl("HOST_ADD", args[0], args[1], args[2], args[3])
+}
+
+func printBootstrap(name string) {
+	cfg := loadConfigOrExit()
+	line, err := hostBootstrapLine(cfg, name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(line)
 }
 
 func runHostNote(args []string) {
