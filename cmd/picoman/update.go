@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"picoman/internal/config"
 	"picoman/internal/outbox"
@@ -23,6 +24,16 @@ import (
 )
 
 const repo = "PiDmitrius/picoman"
+
+// metadataHTTP is for short JSON / redirect requests against GitHub.
+var metadataHTTP = &http.Client{Timeout: 30 * time.Second}
+
+// downloadHTTP allows enough time for a multi-megabyte binary on slow links.
+var downloadHTTP = &http.Client{Timeout: 5 * time.Minute}
+
+var redirectStop = func(req *http.Request, via []*http.Request) error {
+	return http.ErrUseLastResponse
+}
 
 var versionRe = regexp.MustCompile(`(const version = ")(v?)(\d+)\.(\d+)\.(\d+)(")`)
 
@@ -130,11 +141,7 @@ func bumpPatch(srcDir string) (string, error) {
 }
 
 func latestTag() (string, error) {
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: redirectStop}
 	resp, err := client.Head("https://github.com/" + repo + "/releases/latest")
 	if err != nil {
 		return "", err
@@ -174,7 +181,7 @@ func downloadRelease(tag string) (string, error) {
 	}
 
 	fmt.Printf("downloading %s...\n", name)
-	resp, err := http.Get(base + name)
+	resp, err := downloadHTTP.Get(base + name)
 	if err != nil {
 		return "", err
 	}
@@ -213,7 +220,7 @@ func downloadRelease(tag string) (string, error) {
 // fetchReleaseSHA256 returns the lowercase hex sha256 from a sha256sum-format
 // file at url. Format: "<64-hex>  <filename>\n".
 func fetchReleaseSHA256(url string) (string, error) {
-	resp, err := http.Get(url)
+	resp, err := metadataHTTP.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -282,7 +289,7 @@ type releaseInfo struct {
 
 func fetchReleases() ([]releaseInfo, error) {
 	url := "https://api.github.com/repos/" + repo + "/releases?per_page=10"
-	resp, err := http.Get(url)
+	resp, err := metadataHTTP.Get(url)
 	if err != nil {
 		return nil, err
 	}

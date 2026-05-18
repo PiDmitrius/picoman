@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,8 +26,9 @@ const (
 )
 
 type Store struct {
-	db  *sql.DB
-	bot *tg.Client
+	db   *sql.DB
+	bot  *tg.Client
+	done chan struct{} // closed when Run exits
 }
 
 type message struct {
@@ -46,7 +48,7 @@ func Open(path string, bot *tg.Client) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, bot: bot}
+	s := &Store{db: db, bot: bot, done: make(chan struct{})}
 	if err := s.init(); err != nil {
 		db.Close()
 		return nil, err
@@ -105,7 +107,12 @@ values(?, ?, ?, ?, unixepoch())
 	return err
 }
 
+// Done is closed when the Run goroutine has exited. Use it to wait before
+// calling Flush during shutdown so two senders don't pick the same row.
+func (s *Store) Done() <-chan struct{} { return s.done }
+
 func (s *Store) Run(ctx context.Context) {
+	defer close(s.done)
 	wait := baseBackoff
 	for {
 		err := s.SendOne(ctx)
@@ -245,6 +252,12 @@ func (s *Store) notifyDead(msg message, sendErr error) {
 }
 
 func (s *Store) init() error {
+	// Pragmas: WAL gives concurrent readers + one writer without "database is
+	// locked" thrash; busy_timeout retries lock acquisition briefly instead of
+	// failing immediately under contention.
+	if _, err := s.db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`
 create table if not exists outbox (
 	id integer primary key autoincrement,
@@ -259,13 +272,11 @@ create table if not exists outbox (
 	last_error text not null default ''
 );
 create index if not exists outbox_pending on outbox(sent_at, dead_at, id);
+create table if not exists kv (
+	k text primary key,
+	v text not null
+);
 `)
-	if err != nil {
-		return err
-	}
-	_, _ = s.db.Exec(`alter table outbox add column reply_to_id integer not null default 0`)
-	_, _ = s.db.Exec(`alter table outbox add column format text not null default ''`)
-	_, _ = s.db.Exec(`alter table outbox add column dead_at integer`)
 	return err
 }
 
@@ -307,5 +318,25 @@ func (s *Store) recordError(id int64, sendErr error) {
 func (s *Store) fail(id int64, attempts int, sendErr error) {
 	_, _ = s.db.Exec(`update outbox set attempts = ?, last_error = ? where id = ?`,
 		attempts, fmt.Sprint(sendErr), id)
+}
+
+// TelegramOffset returns the last-acked getUpdates offset, or 0 if none.
+// Persisting this avoids re-delivering the long-poll window (up to ~60s of
+// messages) after a daemon restart or crash.
+func (s *Store) TelegramOffset() int64 {
+	var v string
+	if err := s.db.QueryRow(`select v from kv where k = 'tg_offset'`).Scan(&v); err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(v, 10, 64)
+	return n
+}
+
+func (s *Store) SetTelegramOffset(offset int64) error {
+	_, err := s.db.Exec(
+		`insert into kv(k, v) values('tg_offset', ?) on conflict(k) do update set v = excluded.v`,
+		strconv.FormatInt(offset, 10),
+	)
+	return err
 }
 

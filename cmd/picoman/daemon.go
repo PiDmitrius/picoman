@@ -51,14 +51,14 @@ func runDaemon() {
 		log.Fatalf("create work dir: %v", err)
 	}
 
-	writePID()
-	defer removePID()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	st := agent.New(cfg.AgentSocket, cfg.KeyPath, config.MaxTTL(cfg))
 	cleanup := st.CleanStart()
+	if err := st.PrepareAskpass(); err != nil {
+		log.Printf("prepare askpass: %v", err)
+	}
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
 		criticalNotifyUsers(cfg, bot, "outbox", err)
@@ -84,17 +84,25 @@ func runDaemon() {
 	// slow or interactive unseal command. Notifies separately when done.
 	go startupAutoUnseal(ctx, cfg, st, out, bot)
 
-	offset := int64(0)
+	offset := out.TelegramOffset()
+	backoff := time.Second
 	for {
 		updates, err := bot.GetUpdates(ctx, offset)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
-			log.Printf("getUpdates: %v", err)
-			time.Sleep(3 * time.Second)
+			log.Printf("getUpdates: %v (retry in %s)", err, backoff)
+			if !sleepWithCtx(ctx, backoff) {
+				break
+			}
+			backoff *= 2
+			if backoff > time.Minute {
+				backoff = time.Minute
+			}
 			continue
 		}
+		backoff = time.Second
 		for _, upd := range updates {
 			offset = upd.UpdateID + 1
 			if upd.Message.Text == "" {
@@ -102,12 +110,19 @@ func runDaemon() {
 			}
 			handleMessage(ctx, out, cfg, st, bot, upd.Message)
 		}
+		if len(updates) > 0 {
+			if err := out.SetTelegramOffset(offset); err != nil {
+				log.Printf("persist tg offset: %v", err)
+			}
+		}
 	}
 
 	cleanup = st.CleanStart()
 	notify(out, cfg, bot, false, infoText(lifecycleText("stopped", cleanup)))
-	flushOutbox(out)
+	// Stop the Run goroutine first so it doesn't race Flush on next().
 	stopOutbox()
+	<-out.Done()
+	flushOutbox(out)
 }
 
 func lifecycleText(event string, cleanup agent.CleanResult) string {
@@ -241,6 +256,18 @@ func runUnsealCommand(ctx context.Context, cmdline string) (string, error) {
 		return "", fmt.Errorf("unseal command: %w", err)
 	}
 	return strings.TrimRight(stdout.String(), "\r\n"), nil
+}
+
+// sleepWithCtx waits for d or until ctx is cancelled. Returns false if cancelled.
+func sleepWithCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func shortError(err error) string {

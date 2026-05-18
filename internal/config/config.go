@@ -164,7 +164,33 @@ func Save(c *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600)
+	return writeAtomic(filepath.Join(dir, "config.json"), data, 0o600)
+}
+
+// writeAtomic writes content to path via temp+rename so the destination is
+// never observed half-written. Used for config and host DB (and known_hosts
+// goes through the same pattern in daemon.go).
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".write-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func LoadHostDB(c *Config) error {
@@ -199,39 +225,15 @@ func saveHostDBLocked(c *Config) error {
 	if c.HostDB == "" {
 		return fmt.Errorf("host_db is empty")
 	}
-	dir := filepath.Dir(c.HostDB)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.HostDB), 0o700); err != nil {
 		return err
 	}
-	db := HostDB{Hosts: c.Targets}
-	data, err := json.MarshalIndent(db, "", "  ")
+	data, err := json.MarshalIndent(HostDB{Hosts: c.Targets}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".hosts-*.json")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if _, err := tmp.WriteString("\n"); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, c.HostDB)
+	data = append(data, '\n')
+	return writeAtomic(c.HostDB, data, 0o600)
 }
 
 func MaxTTL(c *Config) time.Duration {
