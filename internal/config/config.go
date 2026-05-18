@@ -26,19 +26,20 @@ type HostDB struct {
 }
 
 type Config struct {
-	TelegramToken string            `json:"tg_token"`
-	AllowedUsers  []int64           `json:"tg_allowed_users"`
-	KeyPath       string            `json:"key_path"`
-	KeyPassphrase string            `json:"key_passphrase"`
-	AgentSocket   string            `json:"agent_socket"`
-	ControlSocket string            `json:"control_socket"`
-	MaxUnlockTTL  string            `json:"max_unlock_ttl"`
-	SourceDir     string            `json:"source_dir"`
-	HostDB        string            `json:"host_db"`
-	WorkDir       string            `json:"work_dir"`
-	RemoteWorkDir string            `json:"remote_work_dir"`
-	LogLevel      string            `json:"loglevel"`
-	Targets       map[string]Target `json:"targets"`
+	TelegramToken        string            `json:"tg_token"`
+	AllowedUsers         []int64           `json:"tg_allowed_users"`
+	KeyPath              string            `json:"key_path"`
+	KeyPassphrase        string            `json:"key_passphrase"`
+	KeyPassphraseCommand string            `json:"key_passphrase_command,omitempty"`
+	AgentSocket          string            `json:"agent_socket"`
+	ControlSocket        string            `json:"control_socket"`
+	MaxUnlockTTL         string            `json:"max_unlock_ttl"`
+	SourceDir            string            `json:"source_dir"`
+	HostDB               string            `json:"host_db"`
+	WorkDir              string            `json:"work_dir"`
+	RemoteWorkDir        string            `json:"remote_work_dir"`
+	LogLevel             string            `json:"loglevel"`
+	Targets              map[string]Target `json:"targets"`
 
 	mu sync.RWMutex
 }
