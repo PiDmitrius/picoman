@@ -160,10 +160,16 @@ func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
 }
 
 // defaultAskpassCommand is used when neither key_passphrase nor
-// key_passphrase_command is configured. It reads the passphrase from
-// /dev/tty with echo disabled — works for `picoman unseal` invoked from a
-// terminal, but fails when no tty is attached (daemon under systemd-user).
-const defaultAskpassCommand = "picoman askpass-tty"
+// key_passphrase_command is configured. It prompts on /dev/tty with echo
+// disabled and prints the passphrase to stdout. Works for `picoman unseal`
+// invoked from a terminal; fails when no tty is attached (daemon under
+// systemd-user). Users can override by setting key_passphrase_command.
+const defaultAskpassCommand = `stty -echo </dev/tty && ` +
+	`trap 'stty echo </dev/tty' EXIT INT TERM && ` +
+	`printf 'picoman passphrase: ' >/dev/tty && ` +
+	`IFS= read -r p </dev/tty && ` +
+	`printf '\n' >/dev/tty && ` +
+	`printf %s "$p"`
 
 // configuredUnseal returns the passphrase from config: key_passphrase if set,
 // otherwise key_passphrase_command's stdout. Both fields populated at once is

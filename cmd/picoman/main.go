@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "v0.1.74"
+const version = "v0.1.75"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -51,8 +51,6 @@ func main() {
 		runHost(os.Args[2:])
 	case "askpass":
 		runAskpass()
-	case "askpass-tty":
-		runAskpassTTY()
 	case "update":
 		runUpdate()
 	case "fallback":
