@@ -16,10 +16,11 @@ import (
 
 type State struct {
 	// Immutable after New().
-	socket  string
-	pidPath string
-	keyPath string
-	maxTTL  time.Duration
+	socket      string
+	pidPath     string
+	keyPath     string
+	maxTTL      time.Duration
+	askpassPath string // path to the SSH_ASKPASS bridge script (created on first Unlock and reused)
 
 	// ioMu serializes ssh-agent/ssh-add invocations so state-getters
 	// (Sealed, IsUnlocked, Until) do not block on external I/O.
@@ -43,11 +44,36 @@ func New(socket, keyPath string, maxTTL time.Duration) *State {
 	return &State{socket: socket, pidPath: socket + ".pid", keyPath: keyPath, maxTTL: maxTTL}
 }
 
+// PrepareAskpass writes the SSH_ASKPASS bridge script next to the agent socket
+// once, and caches its path. The script content is invariant — it just execs
+// `picoman askpass` — so there is no reason to regenerate it on every Unlock.
+// Called by the daemon at startup; safe to call repeatedly.
+func (s *State) PrepareAskpass() error {
+	if s.askpassPath != "" {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	path := s.socket + ".askpass"
+	script := "#!/bin/sh\nexec " + strconv.Quote(exe) + " askpass\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		return err
+	}
+	s.askpassPath = path
+	return nil
+}
+
 func (s *State) CleanStart() CleanResult {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
 
 	agentStatus := s.killOldAgent()
+	if s.askpassPath != "" {
+		_ = os.Remove(s.askpassPath)
+		s.askpassPath = ""
+	}
 
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -146,13 +172,11 @@ func (s *State) Unlock(ttl time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	if err := s.PrepareAskpass(); err != nil {
+		return fmt.Errorf("askpass bridge: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, "ssh-add", "-t", strconv.Itoa(int(ttl.Seconds())), s.keyPath)
 	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+s.socket)
-	askpass, cleanup, err := makeAskpass()
-	if err != nil {
-		return err
-	}
-	defer cleanup()
 	devnull, err := os.Open(os.DevNull)
 	if err != nil {
 		return err
@@ -161,7 +185,7 @@ func (s *State) Unlock(ttl time.Duration) error {
 	cmd.Stdin = devnull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = append(cmd.Env,
-		"SSH_ASKPASS="+askpass,
+		"SSH_ASKPASS="+s.askpassPath,
 		"SSH_ASKPASS_REQUIRE=force",
 		"DISPLAY=picoman",
 	)
@@ -176,33 +200,6 @@ func (s *State) Unlock(ttl time.Duration) error {
 	s.until = time.Now().Add(ttl)
 	s.stateMu.Unlock()
 	return nil
-}
-
-func makeAskpass() (string, func(), error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", nil, err
-	}
-	f, err := os.CreateTemp("", "picoman-askpass-*")
-	if err != nil {
-		return "", nil, err
-	}
-	path := f.Name()
-	script := "#!/bin/sh\nexec " + strconv.Quote(exe) + " askpass\n"
-	if _, err := f.WriteString(script); err != nil {
-		f.Close()
-		os.Remove(path)
-		return "", nil, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(path)
-		return "", nil, err
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		os.Remove(path)
-		return "", nil, err
-	}
-	return path, func() { _ = os.Remove(path) }, nil
 }
 
 func (s *State) Lock() error {

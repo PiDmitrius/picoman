@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,19 +21,6 @@ func runStatus() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	_ = cmd.Run()
-}
-
-func pidPath() string {
-	return filepath.Join(config.DataDir(), "picoman.pid")
-}
-
-func writePID() {
-	_ = os.MkdirAll(config.DataDir(), 0o700)
-	_ = os.WriteFile(pidPath(), []byte(fmt.Sprintf("%d", os.Getpid())), 0o600)
-}
-
-func removePID() {
-	_ = os.Remove(pidPath())
 }
 
 type restartMarker struct {

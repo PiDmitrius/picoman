@@ -55,13 +55,37 @@ func runUninstall() {
 	fmt.Println("uninstalled")
 }
 
+// copyFile writes src to dst via temp+rename so dst is never observed
+// half-written: replacing our own binary in ~/.local/bin must not leave a
+// truncated file if the write is interrupted.
 func copyFile(src, dst string, mode os.FileMode) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	_ = os.Remove(dst)
-	return os.WriteFile(dst, data, mode)
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".picoman-install-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, dst)
 }
 
 func renderServiceUnit(binPath string) string {
