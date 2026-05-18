@@ -31,6 +31,7 @@ func runSetup() {
 	cfg.AllowedUsers = promptInt64ListKeep(reader, "Telegram allowed users", cfg.AllowedUsers)
 	cfg.KeyPath = expandPathValue(promptStringKeep(reader, "SSH key path", displayPathValue(cfg.KeyPath)), "")
 	cfg.KeyPassphrase = promptSecretKeep(reader, "SSH key passphrase", cfg.KeyPassphrase)
+	cfg.KeyPassphraseCommand = promptStringKeep(reader, "SSH key passphrase command (stdout = passphrase; takes precedence)", cfg.KeyPassphraseCommand)
 	cfg.AgentSocket = expandPathValue(promptStringKeep(reader, "SSH agent socket", displayPathValue(cfg.AgentSocket)), "")
 	cfg.ControlSocket = expandPathValue(promptStringKeep(reader, "Control socket", displayPathValue(cfg.ControlSocket)), "")
 	cfg.MaxUnlockTTL = promptDurationKeep(reader, "Max unlock TTL", cfg.MaxUnlockTTL)

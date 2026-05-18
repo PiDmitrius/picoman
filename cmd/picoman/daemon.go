@@ -58,8 +58,10 @@ func runDaemon() {
 	cleanup := st.CleanStart()
 	autoUnsealed := false
 	var autoUnsealErr error
-	if cfg.KeyPassphrase != "" {
-		if err := st.Unseal(cfg.KeyPassphrase); err != nil {
+	if passphrase, err := resolveAutoUnseal(cfg); err != nil {
+		autoUnsealErr = err
+	} else if passphrase != "" {
+		if err := st.Unseal(passphrase); err != nil {
 			autoUnsealErr = err
 		} else {
 			autoUnsealed = true
@@ -168,6 +170,31 @@ func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
 		log.Printf("critical notify failed user=%d: %v", userID, sendErr)
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// resolveAutoUnseal returns the passphrase to feed into Unseal at startup.
+// Prefers key_passphrase_command (executed via sh -c, stdout = passphrase) so
+// the secret can live in an external store (gpg-agent, systemd credentials,
+// password manager) instead of plain text on disk. Falls back to the legacy
+// key_passphrase field. Returns "" when neither is set (daemon stays sealed).
+func resolveAutoUnseal(cfg *config.Config) (string, error) {
+	if cmdline := strings.TrimSpace(cfg.KeyPassphraseCommand); cmdline != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg != "" {
+				return "", fmt.Errorf("key_passphrase_command: %w: %s", err, msg)
+			}
+			return "", fmt.Errorf("key_passphrase_command: %w", err)
+		}
+		return strings.TrimRight(stdout.String(), "\r\n"), nil
+	}
+	return cfg.KeyPassphrase, nil
 }
 
 func shortError(err error) string {
