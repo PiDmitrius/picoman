@@ -304,7 +304,11 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 // --- CLI ---
 
 func runUnseal(args []string) {
-	passphrase, err := readPassphrase(args)
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: picoman unseal [passphrase]")
+		os.Exit(1)
+	}
+	passphrase, err := resolveCLIUnseal(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -314,6 +318,24 @@ func runUnseal(args []string) {
 		os.Exit(1)
 	}
 	simpleControl("UNSEAL", passphrase)
+}
+
+// resolveCLIUnseal collects the passphrase from the most explicit source
+// available: an explicit arg, piped stdin, or the configured/default
+// unseal command (with stdin inherited so interactive helpers can prompt).
+func resolveCLIUnseal(args []string) (string, error) {
+	if len(args) == 1 {
+		return args[0], nil
+	}
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		data, err := io.ReadAll(os.Stdin)
+		return strings.TrimRight(string(data), "\r\n"), err
+	}
+	return interactiveUnseal(context.Background(), loadConfigOrExit())
 }
 
 func runSeal() { simpleControl("SEAL") }
@@ -492,6 +514,41 @@ func runAskpass() {
 	fmt.Print(resp)
 }
 
+// runAskpassTTY reads a passphrase from /dev/tty with echo disabled and
+// writes it to stdout. Used as the default unseal command when neither
+// key_passphrase nor key_passphrase_command is set in config. Fails when
+// /dev/tty is unavailable (e.g. daemon under systemd-user with no tty).
+func runAskpassTTY() {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "askpass-tty: %v\n", err)
+		os.Exit(1)
+	}
+	defer tty.Close()
+
+	fmt.Fprint(tty, "picoman passphrase: ")
+	// stty operates on the controlling tty by default; redirect stdin so it
+	// affects /dev/tty even when invoked with stdin piped.
+	stty := exec.Command("stty", "-echo")
+	stty.Stdin = tty
+	_ = stty.Run()
+	defer func() {
+		restore := exec.Command("stty", "echo")
+		restore.Stdin = tty
+		_ = restore.Run()
+		fmt.Fprintln(tty)
+	}()
+
+	line, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil && line == "" {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "askpass-tty: %v\n", err)
+		os.Exit(1)
+	}
+	line = strings.TrimRight(line, "\r\n")
+	fmt.Print(line)
+}
+
 // simpleControl runs a verb, prints the first response payload (if any) to
 // stdout, exits non-zero on ERR. Multi-payload responses (RUN's stdout/stderr)
 // should be consumed via requestControl directly.
@@ -558,31 +615,6 @@ func rawControl(socket, line string) (string, error) {
 		return "", err
 	}
 	return string(resp), nil
-}
-
-func readPassphrase(args []string) (string, error) {
-	if len(args) > 1 {
-		return "", fmt.Errorf("usage: picoman unseal [passphrase]")
-	}
-	if len(args) == 1 {
-		return args[0], nil
-	}
-
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeCharDevice == 0 {
-		data, err := io.ReadAll(os.Stdin)
-		return strings.TrimRight(string(data), "\r\n"), err
-	}
-
-	fmt.Fprint(os.Stderr, "Passphrase: ")
-	_ = exec.Command("stty", "-echo").Run()
-	defer exec.Command("stty", "echo").Run()
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	fmt.Fprintln(os.Stderr)
-	return strings.TrimRight(line, "\r\n"), err
 }
 
 func loadConfigOrExit() *config.Config {

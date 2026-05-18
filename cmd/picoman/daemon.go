@@ -56,17 +56,6 @@ func runDaemon() {
 
 	st := agent.New(cfg.AgentSocket, cfg.KeyPath, config.MaxTTL(cfg))
 	cleanup := st.CleanStart()
-	autoUnsealed := false
-	var autoUnsealErr error
-	if passphrase, err := resolveAutoUnseal(cfg); err != nil {
-		autoUnsealErr = err
-	} else if passphrase != "" {
-		if err := st.Unseal(passphrase); err != nil {
-			autoUnsealErr = err
-		} else {
-			autoUnsealed = true
-		}
-	}
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
 		criticalNotifyUsers(cfg, bot, "outbox", err)
@@ -87,12 +76,10 @@ func runDaemon() {
 	} else {
 		notify(out, cfg, bot, false, infoText(lifecycleText("started", cleanup)))
 	}
-	if autoUnsealed {
-		notify(out, cfg, bot, false, unsealText())
-	}
-	if autoUnsealErr != nil {
-		notify(out, cfg, bot, false, errorText("unseal failed: "+autoUnsealErr.Error()))
-	}
+
+	// Auto-unseal in a goroutine so startup is not blocked on a potentially
+	// slow or interactive unseal command. Notifies separately when done.
+	go startupAutoUnseal(ctx, cfg, st, out, bot)
 
 	offset := int64(0)
 	for {
@@ -172,29 +159,73 @@ func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
 	}
 }
 
-// resolveAutoUnseal returns the passphrase to feed into Unseal at startup.
-// Prefers key_passphrase_command (executed via sh -c, stdout = passphrase) so
-// the secret can live in an external store (gpg-agent, systemd credentials,
-// password manager) instead of plain text on disk. Falls back to the legacy
-// key_passphrase field. Returns "" when neither is set (daemon stays sealed).
-func resolveAutoUnseal(cfg *config.Config) (string, error) {
-	if cmdline := strings.TrimSpace(cfg.KeyPassphraseCommand); cmdline != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg != "" {
-				return "", fmt.Errorf("key_passphrase_command: %w: %s", err, msg)
-			}
-			return "", fmt.Errorf("key_passphrase_command: %w", err)
-		}
-		return strings.TrimRight(stdout.String(), "\r\n"), nil
+// defaultAskpassCommand is used when neither key_passphrase nor
+// key_passphrase_command is configured. It reads the passphrase from
+// /dev/tty with echo disabled — works for `picoman unseal` invoked from a
+// terminal, but fails when no tty is attached (daemon under systemd-user).
+const defaultAskpassCommand = "picoman askpass-tty"
+
+// configuredUnseal returns the passphrase from config: key_passphrase if set,
+// otherwise key_passphrase_command's stdout. Both fields populated at once is
+// rejected at config-load time, so at most one source is consulted here.
+// Returns ("", nil) when neither is set — the caller decides whether to fall
+// back to an interactive prompt.
+func configuredUnseal(ctx context.Context, cfg *config.Config) (string, error) {
+	if cfg.KeyPassphrase != "" {
+		return cfg.KeyPassphrase, nil
 	}
-	return cfg.KeyPassphrase, nil
+	cmdline := strings.TrimSpace(cfg.KeyPassphraseCommand)
+	if cmdline == "" {
+		return "", nil
+	}
+	return runUnsealCommand(ctx, cmdline)
+}
+
+// interactiveUnseal returns the passphrase from configuredUnseal, and if
+// nothing is configured runs the default askpass-tty command. Used by CLI
+// when no arg/pipe is supplied.
+func interactiveUnseal(ctx context.Context, cfg *config.Config) (string, error) {
+	if p, err := configuredUnseal(ctx, cfg); err != nil || p != "" {
+		return p, err
+	}
+	return runUnsealCommand(ctx, defaultAskpassCommand)
+}
+
+// startupAutoUnseal performs the configured auto-unseal in the background.
+// Daemon-startup has no tty, so the default-askpass fallback is intentionally
+// skipped here — if nothing is configured the daemon stays sealed silently.
+func startupAutoUnseal(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client) {
+	passphrase, err := configuredUnseal(ctx, cfg)
+	if err != nil {
+		notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
+		return
+	}
+	if passphrase == "" {
+		return
+	}
+	if err := st.Unseal(passphrase); err != nil {
+		notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
+		return
+	}
+	notify(out, cfg, bot, false, unsealText())
+}
+
+func runUnsealCommand(ctx context.Context, cmdline string) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdline)
+	// Inherit stdin so interactive helpers (askpass-tty, pinentry,
+	// systemd-ask-password) can talk to the user's terminal when one exists.
+	cmd.Stdin = os.Stdin
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return "", fmt.Errorf("unseal command: %w: %s", err, msg)
+		}
+		return "", fmt.Errorf("unseal command: %w", err)
+	}
+	return strings.TrimRight(stdout.String(), "\r\n"), nil
 }
 
 func shortError(err error) string {
@@ -269,6 +300,7 @@ var commands = map[string]cmdEntry{
 	"status": {fn: cmdStatus},
 	"hosts":  {fn: cmdHostList},
 	"host":   {fn: cmdHost},
+	"unseal": {fn: cmdUnseal, async: true},
 	"unlock": {fn: cmdUnlock},
 	"seal":   {fn: cmdSeal},
 	"lock":   {fn: cmdLock},
@@ -410,6 +442,22 @@ func cmdUnlock(c cmdCtx, fields []string) (cmdReply, error) {
 	return cmdReply{text: text}, err
 }
 
+func cmdUnseal(c cmdCtx, _ []string) (cmdReply, error) {
+	// Telegram has no tty for prompting, so fall back to configuredUnseal
+	// only — no default askpass-tty.
+	passphrase, err := configuredUnseal(c.ctx, c.cfg)
+	if err != nil {
+		return cmdReply{}, err
+	}
+	if passphrase == "" {
+		return cmdReply{}, errors.New("no key_passphrase or key_passphrase_command configured")
+	}
+	if err := c.st.Unseal(passphrase); err != nil {
+		return cmdReply{}, err
+	}
+	return cmdReply{text: unsealText()}, nil
+}
+
 func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
 	if err := c.st.Lock(); err != nil {
 		return cmdReply{}, err
@@ -497,6 +545,7 @@ func commandName(s string) string {
 func botHelpText() string {
 	return strings.TrimSpace(`
 commands:
+/unseal
 /unlock 5m
 /unlock
 /seal

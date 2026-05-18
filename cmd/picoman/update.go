@@ -33,7 +33,7 @@ func runUpdate() {
 		os.Exit(1)
 	}
 
-	if cfg.SourceDir == "" {
+	if cfg.DeveloperDir == "" {
 		tag, err := latestTag()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot get latest version: %v\n", err)
@@ -47,15 +47,15 @@ func runUpdate() {
 		return
 	}
 
-	next, err := bumpPatch(cfg.SourceDir)
+	next, err := bumpPatch(cfg.DeveloperDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "version bump failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	bin := filepath.Join(cfg.SourceDir, "picoman")
+	bin := filepath.Join(cfg.DeveloperDir, "picoman")
 	build := exec.Command("go", "build", "-o", bin, "./cmd/picoman")
-	build.Dir = cfg.SourceDir
+	build.Dir = cfg.DeveloperDir
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
