@@ -4,12 +4,21 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
-const version = "v0.1.77"
+const version = "v0.1.78"
 
 func main() {
 	log.SetPrefix("picoman: ")
+
+	// SSH_ASKPASS dispatch: when ssh-add execs us via the askpass symlink,
+	// argv[0] ends in "-askpass" and argv[1] is the prompt text. Detect that
+	// and act as the askpass helper before falling into the verb switch.
+	if strings.HasSuffix(os.Args[0], "-askpass") {
+		runAskpass()
+		return
+	}
 
 	if len(os.Args) < 2 {
 		printUsage()

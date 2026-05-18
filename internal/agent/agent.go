@@ -44,10 +44,12 @@ func New(socket, keyPath string, maxTTL time.Duration) *State {
 	return &State{socket: socket, pidPath: socket + ".pid", keyPath: keyPath, maxTTL: maxTTL}
 }
 
-// PrepareAskpass writes the SSH_ASKPASS bridge script next to the agent socket
-// once, and caches its path. The script content is invariant — it just execs
-// `picoman askpass` — so there is no reason to regenerate it on every Unlock.
-// Called by the daemon at startup; safe to call repeatedly.
+// PrepareAskpass creates a symlink to the picoman binary with a "-askpass"
+// suffix. ssh-add execs SSH_ASKPASS via execve, so the file must be an
+// executable — not a shell command. The "-askpass" suffix lets main.go
+// detect by argv[0] that it was invoked as the askpass helper and skip the
+// normal verb dispatch. Cheaper than a shell-script wrapper, no extra sh
+// fork, and one less moving piece on disk.
 func (s *State) PrepareAskpass() error {
 	if s.askpassPath != "" {
 		return nil
@@ -56,9 +58,9 @@ func (s *State) PrepareAskpass() error {
 	if err != nil {
 		return err
 	}
-	path := s.socket + ".askpass"
-	script := "#!/bin/sh\nexec " + strconv.Quote(exe) + " askpass\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	path := s.socket + "-askpass"
+	_ = os.Remove(path) // stale link from a previous run
+	if err := os.Symlink(exe, path); err != nil {
 		return err
 	}
 	s.askpassPath = path
