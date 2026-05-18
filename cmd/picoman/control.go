@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"picoman/internal/agent"
@@ -153,13 +155,90 @@ func writeErr(conn net.Conn, err error) {
 	_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
 }
 
+// handleAskpass speaks the raw ssh-askpass format. To avoid handing the
+// passphrase to arbitrary same-user processes, only descendants of the
+// running daemon get a real answer; everyone else sees the sealed-style
+// empty line. Legit caller chain is: askpass-symlink → ssh-add → daemon.
 func handleAskpass(conn net.Conn, st *agent.State) {
+	if !askpassCallerTrusted(conn) {
+		_, _ = io.WriteString(conn, "\n")
+		return
+	}
 	passphrase := st.Passphrase()
 	if passphrase == "" {
 		_, _ = io.WriteString(conn, "\n")
 		return
 	}
 	_, _ = io.WriteString(conn, passphrase+"\n")
+}
+
+func askpassCallerTrusted(conn net.Conn) bool {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return false
+	}
+	peer, err := peerPID(uc)
+	if err != nil {
+		log.Printf("askpass peer pid: %v", err)
+		return false
+	}
+	daemon := os.Getpid()
+	if peer == daemon {
+		return false // we never call ourselves
+	}
+	ok = isDescendantOf(peer, daemon)
+	if !ok {
+		log.Printf("askpass refused: peer pid=%d is not a descendant of daemon pid=%d", peer, daemon)
+	}
+	return ok
+}
+
+func peerPID(uc *net.UnixConn) (int, error) {
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var ucred *syscall.Ucred
+	var sockErr error
+	if err := raw.Control(func(fd uintptr) {
+		ucred, sockErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil {
+		return 0, err
+	}
+	if sockErr != nil {
+		return 0, sockErr
+	}
+	return int(ucred.Pid), nil
+}
+
+// isDescendantOf walks /proc/$pid/status's PPid: chain. Returns true if
+// ancestor appears anywhere above pid before hitting pid 1 / 0.
+func isDescendantOf(pid, ancestor int) bool {
+	for hops := 0; hops < 64; hops++ {
+		ppid, err := readPPID(pid)
+		if err != nil || ppid <= 1 {
+			return false
+		}
+		if ppid == ancestor {
+			return true
+		}
+		pid = ppid
+	}
+	return false
+}
+
+func readPPID(pid int) (int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		return strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
+	}
+	return 0, errors.New("PPid line missing")
 }
 
 // --- handlers ---
