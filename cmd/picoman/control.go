@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -512,41 +511,6 @@ func runAskpass() {
 		os.Exit(1)
 	}
 	fmt.Print(resp)
-}
-
-// runAskpassTTY reads a passphrase from /dev/tty with echo disabled and
-// writes it to stdout. Used as the default unseal command when neither
-// key_passphrase nor key_passphrase_command is set in config. Fails when
-// /dev/tty is unavailable (e.g. daemon under systemd-user with no tty).
-func runAskpassTTY() {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "askpass-tty: %v\n", err)
-		os.Exit(1)
-	}
-	defer tty.Close()
-
-	fmt.Fprint(tty, "picoman passphrase: ")
-	// stty operates on the controlling tty by default; redirect stdin so it
-	// affects /dev/tty even when invoked with stdin piped.
-	stty := exec.Command("stty", "-echo")
-	stty.Stdin = tty
-	_ = stty.Run()
-	defer func() {
-		restore := exec.Command("stty", "echo")
-		restore.Stdin = tty
-		_ = restore.Run()
-		fmt.Fprintln(tty)
-	}()
-
-	line, err := bufio.NewReader(tty).ReadString('\n')
-	if err != nil && line == "" {
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintf(os.Stderr, "askpass-tty: %v\n", err)
-		os.Exit(1)
-	}
-	line = strings.TrimRight(line, "\r\n")
-	fmt.Print(line)
 }
 
 // simpleControl runs a verb, prints the first response payload (if any) to
