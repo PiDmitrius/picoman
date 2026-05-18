@@ -541,24 +541,26 @@ func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
-	stdout, stderr, command, exitCode, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	stdout, stderr, command, target, exitCode, err := handleRun(c.ctx, c.cfg, c.st, fields)
 	if command == "" {
 		return cmdReply{html: true}, err
 	}
+	// Transport-level failures: ssh couldn't run at all, or returned 255
+	// (its own signal for connect/auth/protocol error). Everything else is
+	// the remote command's own exit code — propagate transparently.
 	if err != nil {
 		return cmdReply{
-			text: runErrorText(fields[1], command, stdout, stderr, err.Error()),
+			text: runErrorText(target, command, stdout, stderr, err.Error()),
 			html: true,
 		}, err
 	}
-	if exitCode != 0 {
-		reason := fmt.Sprintf("exit status %d", exitCode)
+	if exitCode == 255 {
 		return cmdReply{
-			text: runErrorText(fields[1], command, stdout, stderr, reason),
+			text: runErrorText(target, command, stdout, stderr, "ssh: exit status 255 (connect/auth/protocol)"),
 			html: true,
-		}, errors.New(reason)
+		}, errors.New("ssh: exit status 255")
 	}
-	return cmdReply{text: runText(fields[1], command, stdout, stderr), html: true}, nil
+	return cmdReply{text: runText(target, command, stdout, stderr), html: true}, nil
 }
 
 func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
@@ -615,7 +617,7 @@ commands:
 /host <name>
 /host note <name> [note]
 /host add
-/run <target> <command>
+/run [--split-streams] <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
 `)
@@ -853,17 +855,28 @@ func remoteShellQuote(s string) string {
 	return shellQuote(s)
 }
 
-// handleRun returns stdout, stderr, command, and the ssh exit code.
+// handleRun returns stdout, stderr, command, target, and the ssh exit code.
 // err is non-nil only for transport-level failures (target unknown, key
-// locked, ssh couldn't run). Remote non-zero exit shows up as exitCode != 0
-// with err == nil — callers decide how to surface that.
-func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (stdout, stderr, command string, exitCode int, err error) {
-	if len(fields) < 3 {
-		return "", "", "", 0, errors.New("usage: /run <target> <command>")
+// locked, ssh couldn't run). A remote non-zero exit is not an error — it's
+// just the remote command's own signal, surfaced via exitCode.
+//
+// The first field after `run` may be `--split-streams` to keep stdout/stderr
+// separate; default merges them into stdout in arrival order so chained
+// commands (a && b && c) keep temporal context.
+func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (stdout, stderr, command, target string, exitCode int, err error) {
+	args := fields[1:]
+	mergeStreams := true
+	if len(args) > 0 && args[0] == "--split-streams" {
+		mergeStreams = false
+		args = args[1:]
 	}
-	command = strings.Join(fields[2:], " ")
-	stdout, stderr, exitCode, err = runTarget(ctx, cfg, st, fields[1], command)
-	return stdout, stderr, command, exitCode, err
+	if len(args) < 2 {
+		return "", "", "", "", 0, errors.New("usage: /run [--split-streams] <target> <command>")
+	}
+	target = args[0]
+	command = strings.Join(args[1:], " ")
+	stdout, stderr, exitCode, err = runTarget(ctx, cfg, st, target, command, mergeStreams)
+	return stdout, stderr, command, target, exitCode, err
 }
 
 func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -899,12 +912,12 @@ func defaultTransferName(name string) string {
 	return path.Base(clean)
 }
 
-func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (stdout, stderr string, exitCode int, err error) {
+func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string, mergeStreams bool) (stdout, stderr string, exitCode int, err error) {
 	t, err := targetForSSH(cfg, st, name)
 	if err != nil {
 		return "", "", 0, err
 	}
-	return runSSH(ctx, st.Socket(), t, command)
+	return runSSH(ctx, st.Socket(), t, command, mergeStreams)
 }
 
 func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, error) {
@@ -1006,7 +1019,7 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 		return err
 	}
 	remoteDir := path.Dir(remotePath)
-	_, mkStderr, code, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir))
+	_, mkStderr, code, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir), false)
 	if err != nil {
 		return err
 	}
@@ -1086,7 +1099,12 @@ func runSCP(ctx context.Context, agentSocket string, t config.Target, from strin
 // ssh ran to completion the exit code is whatever ssh reported — which per
 // `man ssh` is the remote command's exit code, or 255 if ssh hit a
 // network/auth/etc. problem of its own. Trailing newlines are trimmed.
-func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string) (stdout, stderr string, exitCode int, err error) {
+//
+// When mergeStreams is true, remote stdout and stderr are captured into a
+// single buffer so callers see them in arrival order (Go's exec package
+// serializes writes when Stdout and Stderr point at the same writer). The
+// returned stderr is empty in that mode.
+func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, mergeStreams bool) (stdout, stderr string, exitCode int, err error) {
 	args := sshArgs(t)
 	args = append(args,
 		"--",
@@ -1099,11 +1117,17 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
+	if mergeStreams {
+		cmd.Stderr = &outBuf
+	} else {
+		cmd.Stderr = &errBuf
+	}
 
 	runErr := cmd.Run()
 	stdout = strings.TrimRight(outBuf.String(), "\n")
-	stderr = strings.TrimRight(errBuf.String(), "\n")
+	if !mergeStreams {
+		stderr = strings.TrimRight(errBuf.String(), "\n")
+	}
 	if runErr == nil {
 		return stdout, stderr, 0, nil
 	}
