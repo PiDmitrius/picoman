@@ -315,33 +315,28 @@ func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 }
 
 func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return nil, errors.New("usage: RUN <host> <command> [split]")
+	if len(args) != 2 {
+		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
-	mergeStreams := true
-	if len(args) == 3 && string(args[2]) == "split" {
-		mergeStreams = false
-	}
-	stdout, stderr, exitCode, err := runTarget(ctx, s.cfg, s.st, host, command, mergeStreams)
+	output, exitCode, err := runTarget(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, stdout, stderr, err.Error()))
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
 		return nil, err
 	}
 	switch {
 	case exitCode == 255:
 		// ssh-level failure (connect/auth/protocol). Distinct from any
 		// remote exit 1..254 which we propagate transparently.
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, stdout, stderr, "ssh: exit status 255 (connect/auth/protocol)"))
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
 	case s.audit.LogLevel() == "all":
-		notify(s.out, s.cfg, s.bot, true, runText(host, command, stdout, stderr))
+		notify(s.out, s.cfg, s.bot, true, runText(host, command, output))
 	default:
 		notify(s.out, s.cfg, s.bot, true, actionText("▶️ run", host))
 	}
 	return [][]byte{
-		[]byte(stdout),
-		[]byte(stderr),
+		[]byte(output),
 		[]byte(strconv.Itoa(exitCode)),
 	}, nil
 }
@@ -451,20 +446,11 @@ func runUnlock(args []string) {
 }
 
 func runLocalRun(args []string) {
-	mergeStreams := true
-	if len(args) > 0 && args[0] == "--split-streams" {
-		mergeStreams = false
-		args = args[1:]
-	}
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: picoman run [--split-streams] <target> <command>")
+		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
 		os.Exit(2)
 	}
-	rpc := []string{args[0], strings.Join(args[1:], " ")}
-	if !mergeStreams {
-		rpc = append(rpc, "split")
-	}
-	parts, err := requestControl("RUN", rpc...)
+	parts, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
 	if err != nil {
 		// Transport-level failure (target unknown, key locked, ssh couldn't
 		// start). Use 255 to match ssh's own "something went wrong" exit code.
@@ -477,15 +463,9 @@ func runLocalRun(args []string) {
 			fmt.Println()
 		}
 	}
-	if len(parts) > 1 && len(parts[1]) > 0 {
-		os.Stderr.Write(parts[1])
-		if !strings.HasSuffix(string(parts[1]), "\n") {
-			fmt.Fprintln(os.Stderr)
-		}
-	}
 	exitCode := 0
-	if len(parts) > 2 {
-		if code, perr := strconv.Atoi(strings.TrimSpace(string(parts[2]))); perr == nil {
+	if len(parts) > 1 {
+		if code, perr := strconv.Atoi(strings.TrimSpace(string(parts[1]))); perr == nil {
 			exitCode = code
 		}
 	}
