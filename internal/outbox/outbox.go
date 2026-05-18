@@ -220,6 +220,17 @@ func (s *Store) SendOne(ctx context.Context) error {
 	if !isPermanent(sendErr) {
 		s.recordError(msg.id, sendErr)
 		log.Printf("outbox transient id=%d chat=%d: %v", msg.id, msg.chatID, sendErr)
+		// Honor Telegram's retry_after hint: if we keep hammering through it,
+		// the API may escalate the cooldown. Cap at 5 min for safety.
+		var apiErr *tg.APIError
+		if errors.As(sendErr, &apiErr) && apiErr.RetryAfter > 0 {
+			wait := time.Duration(apiErr.RetryAfter) * time.Second
+			if wait > 5*time.Minute {
+				wait = 5 * time.Minute
+			}
+			log.Printf("outbox honoring retry_after id=%d chat=%d wait=%s", msg.id, msg.chatID, wait)
+			_ = sleepCtx(ctx, wait)
+		}
 		return sendErr
 	}
 
