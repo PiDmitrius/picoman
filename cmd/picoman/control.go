@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,27 +229,24 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
-	stdout, stderr, err := runTarget(ctx, s.cfg, s.st, host, command)
+	stdout, stderr, exitCode, err := runTarget(ctx, s.cfg, s.st, host, command)
 	if err != nil {
 		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, stdout, stderr, err.Error()))
-		// Surface partial stdout/stderr to the CLI by embedding them in the
-		// error reason — protocol stays simple ERR-string while CLI users
-		// see more than just "ssh: exit status N".
-		reason := err.Error()
-		if stdout != "" {
-			reason += "\nstdout:\n" + stdout
-		}
-		if stderr != "" {
-			reason += "\nstderr:\n" + stderr
-		}
-		return nil, errors.New(reason)
+		return nil, err
 	}
-	if s.audit.LogLevel() == "all" {
+	switch {
+	case exitCode != 0:
+		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, stdout, stderr, fmt.Sprintf("exit status %d", exitCode)))
+	case s.audit.LogLevel() == "all":
 		notify(s.out, s.cfg, s.bot, true, runText(host, command, stdout, stderr))
-	} else {
+	default:
 		notify(s.out, s.cfg, s.bot, true, actionText("▶️ run", host))
 	}
-	return [][]byte{[]byte(stdout), []byte(stderr)}, nil
+	return [][]byte{
+		[]byte(stdout),
+		[]byte(stderr),
+		[]byte(strconv.Itoa(exitCode)),
+	}, nil
 }
 
 func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error) {
@@ -336,12 +334,14 @@ func runUnlock(args []string) {
 func runLocalRun(args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
-		os.Exit(1)
+		os.Exit(2)
 	}
 	parts, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
 	if err != nil {
+		// Transport-level failure (target unknown, key locked, ssh couldn't
+		// start). Use 255 to match ssh's own "something went wrong" exit code.
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(255)
 	}
 	if len(parts) > 0 && len(parts[0]) > 0 {
 		os.Stdout.Write(parts[0])
@@ -355,6 +355,13 @@ func runLocalRun(args []string) {
 			fmt.Fprintln(os.Stderr)
 		}
 	}
+	exitCode := 0
+	if len(parts) > 2 {
+		if code, perr := strconv.Atoi(strings.TrimSpace(string(parts[2]))); perr == nil {
+			exitCode = code
+		}
+	}
+	os.Exit(exitCode)
 }
 
 func runLocalGet(args []string) {

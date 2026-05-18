@@ -407,7 +407,7 @@ func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
-	stdout, stderr, command, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	stdout, stderr, command, exitCode, err := handleRun(c.ctx, c.cfg, c.st, fields)
 	if command == "" {
 		return cmdReply{html: true}, err
 	}
@@ -416,6 +416,13 @@ func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
 			text: runErrorText(fields[1], command, stdout, stderr, err.Error()),
 			html: true,
 		}, err
+	}
+	if exitCode != 0 {
+		reason := fmt.Sprintf("exit status %d", exitCode)
+		return cmdReply{
+			text: runErrorText(fields[1], command, stdout, stderr, reason),
+			html: true,
+		}, errors.New(reason)
 	}
 	return cmdReply{text: runText(fields[1], command, stdout, stderr), html: true}, nil
 }
@@ -708,17 +715,17 @@ func remoteShellQuote(s string) string {
 	return shellQuote(s)
 }
 
-// handleRun returns stdout, stderr, and command. err is non-nil whenever the
-// remote command did not exit cleanly (or ssh itself failed); stdout/stderr
-// are returned anyway so callers can surface partial output. command is "" only
-// when usage validation failed.
-func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (stdout, stderr, command string, err error) {
+// handleRun returns stdout, stderr, command, and the ssh exit code.
+// err is non-nil only for transport-level failures (target unknown, key
+// locked, ssh couldn't run). Remote non-zero exit shows up as exitCode != 0
+// with err == nil — callers decide how to surface that.
+func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (stdout, stderr, command string, exitCode int, err error) {
 	if len(fields) < 3 {
-		return "", "", "", errors.New("usage: /run <target> <command>")
+		return "", "", "", 0, errors.New("usage: /run <target> <command>")
 	}
 	command = strings.Join(fields[2:], " ")
-	stdout, stderr, err = runTarget(ctx, cfg, st, fields[1], command)
-	return stdout, stderr, command, err
+	stdout, stderr, exitCode, err = runTarget(ctx, cfg, st, fields[1], command)
+	return stdout, stderr, command, exitCode, err
 }
 
 func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -754,10 +761,10 @@ func defaultTransferName(name string) string {
 	return path.Base(clean)
 }
 
-func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (stdout, stderr string, err error) {
+func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (stdout, stderr string, exitCode int, err error) {
 	t, knownHosts, err := targetForSSH(cfg, st, name)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	return runSSH(ctx, st.Socket(), t, command, knownHosts)
 }
@@ -844,8 +851,12 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 		return err
 	}
 	remoteDir := path.Dir(remotePath)
-	if _, _, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir), knownHosts); err != nil {
+	_, mkStderr, code, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir), knownHosts)
+	if err != nil {
 		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("mkdir -p: exit status %d: %s", code, strings.TrimSpace(mkStderr))
 	}
 	return runSCP(ctx, st.Socket(), t, knownHosts, localPath, remoteSpec(t, remotePath))
 }
@@ -915,11 +926,12 @@ func runSCP(ctx context.Context, agentSocket string, t config.Target, knownHosts
 	return nil
 }
 
-// runSSH returns stdout, stderr, and an error. The error is non-nil when the
-// remote command exited non-zero or ssh itself failed; in either case the
-// captured stdout/stderr are still returned so callers can surface partial
-// output. Trailing newlines are trimmed.
-func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (stdout, stderr string, err error) {
+// runSSH returns stdout, stderr, the exit code, and an error. The error is
+// non-nil only when ssh itself failed to run (e.g. couldn't be started). When
+// ssh ran to completion the exit code is whatever ssh reported — which per
+// `man ssh` is the remote command's exit code, or 255 if ssh hit a
+// network/auth/etc. problem of its own. Trailing newlines are trimmed.
+func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string, knownHosts string) (stdout, stderr string, exitCode int, err error) {
 	args := sshArgs(t, knownHosts)
 	args = append(args,
 		"--",
@@ -938,13 +950,13 @@ func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteComm
 	stdout = strings.TrimRight(outBuf.String(), "\n")
 	stderr = strings.TrimRight(errBuf.String(), "\n")
 	if runErr == nil {
-		return stdout, stderr, nil
+		return stdout, stderr, 0, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
-		return stdout, stderr, fmt.Errorf("ssh: exit status %d", exitErr.ExitCode())
+		return stdout, stderr, exitErr.ExitCode(), nil
 	}
-	return stdout, stderr, fmt.Errorf("ssh: %w", runErr)
+	return stdout, stderr, 0, fmt.Errorf("ssh: %w", runErr)
 }
 
 // sshCommonOpts builds the options shared by ssh and scp.
