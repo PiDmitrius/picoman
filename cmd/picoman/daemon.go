@@ -43,12 +43,16 @@ func runDaemon() {
 		criticalNotifyUsers(cfg, bot, "hostdb", err)
 		log.Fatalf("load host db: %v", err)
 	}
-	if err := writeKnownHosts(cfg); err != nil {
-		log.Printf("write known_hosts: %v", err)
-	}
 	if err := os.MkdirAll(cfg.WorkDir, 0o700); err != nil {
 		criticalNotifyUsers(cfg, bot, "workdir", err)
 		log.Fatalf("create work dir: %v", err)
+	}
+
+	// Non-fatal startup issues: log now, report through outbox once it's open.
+	var startupWarnings []string
+	if err := writeKnownHosts(cfg); err != nil {
+		log.Printf("write known_hosts: %v", err)
+		startupWarnings = append(startupWarnings, "write known_hosts: "+err.Error())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -58,6 +62,7 @@ func runDaemon() {
 	cleanup := st.CleanStart()
 	if err := st.PrepareAskpass(); err != nil {
 		log.Printf("prepare askpass: %v", err)
+		startupWarnings = append(startupWarnings, "prepare askpass: "+err.Error())
 	}
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
@@ -65,6 +70,15 @@ func runDaemon() {
 		log.Fatalf("open outbox: %v", err)
 	}
 	defer out.Close()
+	out.SetAlertSink(func(text string) {
+		go func() {
+			for _, uid := range cfg.AllowedUsers {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				_ = bot.SendMessage(ctx, uid, text)
+				cancel()
+			}
+		}()
+	})
 
 	outboxCtx, stopOutbox := context.WithCancel(context.Background())
 	defer stopOutbox()
@@ -78,6 +92,9 @@ func runDaemon() {
 		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
 	} else {
 		notify(out, cfg, bot, false, infoText(lifecycleText("started", cleanup)))
+	}
+	for _, w := range startupWarnings {
+		notify(out, cfg, bot, false, errorText(w))
 	}
 
 	// Auto-unseal in a goroutine so startup is not blocked on a potentially
@@ -111,9 +128,8 @@ func runDaemon() {
 			handleMessage(ctx, out, cfg, st, bot, upd.Message)
 		}
 		if len(updates) > 0 {
-			if err := out.SetTelegramOffset(offset); err != nil {
-				log.Printf("persist tg offset: %v", err)
-			}
+			// SetTelegramOffset emits its own alert (via outbox sink) on error.
+			_ = out.SetTelegramOffset(offset)
 		}
 	}
 
@@ -354,8 +370,9 @@ var commands = map[string]cmdEntry{
 
 func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
 	if !config.AllowedSet(cfg)[msg.From.ID] {
+		// Silent drop: replying "denied" leaks bot existence to anyone who
+		// pings the chat. Journal record is enough for forensics.
 		log.Printf("deny user=%d username=%s text=%q", msg.From.ID, msg.From.Username, msg.Text)
-		enqueueReply(out, bot, msg, cmdReply{text: errorText("denied")})
 		return
 	}
 

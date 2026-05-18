@@ -103,7 +103,7 @@ func (s *controlServer) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if verb == "ASKPASS" {
-		handleAskpass(conn, s.st)
+		s.handleAskpass(conn)
 		return
 	}
 	h, ok := s.handlers()[verb]
@@ -159,12 +159,12 @@ func writeErr(conn net.Conn, err error) {
 // passphrase to arbitrary same-user processes, only descendants of the
 // running daemon get a real answer; everyone else sees the sealed-style
 // empty line. Legit caller chain is: askpass-symlink → ssh-add → daemon.
-func handleAskpass(conn net.Conn, st *agent.State) {
-	if !askpassCallerTrusted(conn) {
+func (s *controlServer) handleAskpass(conn net.Conn) {
+	if !s.askpassCallerTrusted(conn) {
 		_, _ = io.WriteString(conn, "\n")
 		return
 	}
-	passphrase := st.Passphrase()
+	passphrase := s.st.Passphrase()
 	if passphrase == "" {
 		_, _ = io.WriteString(conn, "\n")
 		return
@@ -172,7 +172,7 @@ func handleAskpass(conn net.Conn, st *agent.State) {
 	_, _ = io.WriteString(conn, passphrase+"\n")
 }
 
-func askpassCallerTrusted(conn net.Conn) bool {
+func (s *controlServer) askpassCallerTrusted(conn net.Conn) bool {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return false
@@ -186,11 +186,23 @@ func askpassCallerTrusted(conn net.Conn) bool {
 	if peer == daemon {
 		return false // we never call ourselves
 	}
-	ok = isDescendantOf(peer, daemon)
-	if !ok {
-		log.Printf("askpass refused: peer pid=%d is not a descendant of daemon pid=%d", peer, daemon)
+	if isDescendantOf(peer, daemon) {
+		return true
 	}
-	return ok
+	cmd := procCommand(peer)
+	log.Printf("askpass refused: peer pid=%d cmd=%q is not a descendant of daemon pid=%d", peer, cmd, daemon)
+	notify(s.out, s.cfg, s.bot, false,
+		fmt.Sprintf("❌ askpass refused\npid=%d cmd=%q", peer, cmd))
+	return false
+}
+
+// procCommand returns /proc/$pid/comm, trimmed. Best-effort; "" on failure.
+func procCommand(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func peerPID(uc *net.UnixConn) (int, error) {
