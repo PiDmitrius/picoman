@@ -446,11 +446,12 @@ func runUnlock(args []string) {
 }
 
 func runLocalRun(args []string) {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: picoman run <target> <command>")
+	target, command, err := resolveRunCommand(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	parts, err := requestControl("RUN", args[0], strings.Join(args[1:], " "))
+	parts, err := requestControl("RUN", target, command)
 	if err != nil {
 		// Transport-level failure (target unknown, key locked, ssh couldn't
 		// start). Use 255 to match ssh's own "something went wrong" exit code.
@@ -470,6 +471,27 @@ func runLocalRun(args []string) {
 		}
 	}
 	os.Exit(exitCode)
+}
+
+func resolveRunCommand(args []string) (string, string, error) {
+	if len(args) < 1 {
+		return "", "", errors.New("usage: picoman run <target> [<command>...]")
+	}
+	if len(args) > 1 {
+		return args[0], strings.Join(args[1:], " "), nil
+	}
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return "", "", err
+	}
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return "", "", errors.New("usage: picoman run <target> [<command>...]")
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", "", err
+	}
+	return args[0], strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func runLocalGet(args []string) {
