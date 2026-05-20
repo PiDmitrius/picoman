@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.86"
+const version = "v0.1.87"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -61,7 +61,7 @@ func main() {
 	case "askpass":
 		runAskpass()
 	case "update":
-		runUpdate()
+		runUpdate(os.Args[2:])
 	case "fallback":
 		runFallback(os.Args[2:])
 	case "version":
@@ -106,6 +106,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Maintenance:")
 	fmt.Fprintln(os.Stderr, "  loglevel <chat|all>                Set audit verbosity")
-	fmt.Fprintln(os.Stderr, "  update                             Update from developer_dir or latest GitHub release")
+	fmt.Fprintln(os.Stderr, "  update [--help]                    Update from developer_dir or latest GitHub release")
 	fmt.Fprintln(os.Stderr, "  fallback [<tag>]                   Install a specific GitHub release (no tag = list recent)")
 }
