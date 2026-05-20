@@ -37,7 +37,16 @@ var redirectStop = func(req *http.Request, via []*http.Request) error {
 
 var versionRe = regexp.MustCompile(`(const version = ")(v?)(\d+)\.(\d+)\.(\d+)(")`)
 
-func runUpdate() {
+func runUpdate(args []string) {
+	if len(args) > 0 {
+		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+			printUpdateHelp()
+			return
+		}
+		fmt.Fprintln(os.Stderr, "usage: picoman update [--help]")
+		os.Exit(2)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot load config: %v\n", err)
@@ -80,6 +89,46 @@ func runUpdate() {
 	}
 }
 
+func printUpdateHelp() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("picoman update")
+	fmt.Println("config: " + filepath.Join(config.Dir(), "config.json"))
+	fmt.Println("current binary: " + version)
+
+	if cfg.DeveloperDir == "" {
+		fmt.Println("mode: github release")
+		fmt.Println("without --help:")
+		fmt.Println("  - resolve latest GitHub release for " + repo)
+		fmt.Printf("  - download picoman-<tag>-%s-%s and .sha256\n", runtime.GOOS, runtime.GOARCH)
+		fmt.Println("  - verify sha256")
+		fmt.Println("  - install downloaded binary")
+		fmt.Println("  - write restart marker")
+		fmt.Println("  - restart picoman.service")
+		return
+	}
+
+	current, next, err := patchVersionPlan(cfg.DeveloperDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot inspect developer_dir: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("mode: developer")
+	fmt.Println("developer_dir: " + cfg.DeveloperDir)
+	fmt.Println("source version: " + current)
+	fmt.Println("next version: " + next)
+	fmt.Println("without --help:")
+	fmt.Println("  - bump cmd/picoman/main.go patch version")
+	fmt.Println("  - run go build -o " + filepath.Join(cfg.DeveloperDir, "picoman") + " ./cmd/picoman")
+	fmt.Println("  - install built binary")
+	fmt.Println("  - write restart marker")
+	fmt.Println("  - restart picoman.service")
+}
+
 func runFallback(args []string) {
 	if len(args) > 1 {
 		fmt.Fprintln(os.Stderr, "usage: picoman fallback [tag]")
@@ -106,16 +155,35 @@ func runFallback(args []string) {
 }
 
 func bumpPatch(srcDir string) (string, error) {
-	path := filepath.Join(srcDir, "cmd", "picoman", "main.go")
-	data, err := os.ReadFile(path)
+	current, next, path, out, err := patchVersion(srcDir)
 	if err != nil {
 		return "", err
 	}
+	fmt.Printf("version: %s -> %s\n", current, next)
+	return next, os.WriteFile(path, out, 0o644)
+}
+
+func patchVersionPlan(srcDir string) (string, string, error) {
+	current, next, _, _, err := patchVersion(srcDir)
+	return current, next, err
+}
+
+func patchVersion(srcDir string) (string, string, string, []byte, error) {
+	path := filepath.Join(srcDir, "cmd", "picoman", "main.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", "", nil, err
+	}
 	m := versionRe.FindSubmatchIndex(data)
 	if m == nil {
-		return "", fmt.Errorf("version string not found in %s", path)
+		return "", "", "", nil, fmt.Errorf("version string not found in %s", path)
 	}
 	patch, _ := strconv.Atoi(string(data[m[10]:m[11]]))
+	current := fmt.Sprintf("v%s.%s.%d",
+		string(data[m[6]:m[7]]),
+		string(data[m[8]:m[9]]),
+		patch,
+	)
 	next := fmt.Sprintf("v%s.%s.%d",
 		string(data[m[6]:m[7]]),
 		string(data[m[8]:m[9]]),
@@ -135,9 +203,7 @@ func bumpPatch(srcDir string) (string, error) {
 	out = append(out, repl...)
 	out = append(out, data[m[1]:]...)
 
-	fmt.Printf("version: v%s.%s.%d -> %s\n",
-		string(data[m[6]:m[7]]), string(data[m[8]:m[9]]), patch, next)
-	return next, os.WriteFile(path, out, 0o644)
+	return current, next, path, out, nil
 }
 
 func latestTag() (string, error) {
