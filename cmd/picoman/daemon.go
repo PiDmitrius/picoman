@@ -302,7 +302,7 @@ func flushOutbox(out *outbox.Store) {
 }
 
 func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, cfg *config.Config, bot *tg.Client) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	var activeUntil time.Time
@@ -661,10 +661,26 @@ func statusText(st *agent.State) string {
 func leftText(until time.Time) string {
 	left := time.Until(until)
 	if left <= 0 {
-		return "0m left"
+		return "0s left"
 	}
-	minutes := int((left + time.Minute - time.Nanosecond) / time.Minute)
-	return fmt.Sprintf("%dm left", minutes)
+	seconds := int((left + time.Second - time.Nanosecond) / time.Second)
+	if seconds <= 60 {
+		return fmt.Sprintf("%ds left", seconds)
+	}
+	minutes := seconds / 60
+	seconds %= 60
+	if minutes < 60 {
+		if seconds == 0 {
+			return fmt.Sprintf("%dm left", minutes)
+		}
+		return fmt.Sprintf("%dm %ds left", minutes, seconds)
+	}
+	hours := minutes / 60
+	minutes %= 60
+	if minutes == 0 {
+		return fmt.Sprintf("%dh left", hours)
+	}
+	return fmt.Sprintf("%dh %dm left", hours, minutes)
 }
 
 func hostsText(cfg *config.Config) string {
