@@ -380,7 +380,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	if len(fields) == 0 {
 		return
 	}
-	name := commandName(fields[0])
+	name, fields := normalizeCommandFields(fields)
 
 	if isVersionCommand(name) {
 		go handleInstallVersionMessage(out, bot, msg, tagFromVersionCommand(name))
@@ -603,12 +603,32 @@ func commandName(s string) string {
 	return strings.TrimLeft(strings.ToLower(s), "/")
 }
 
+func normalizeCommandFields(fields []string) (string, []string) {
+	name := commandName(fields[0])
+	if isVersionCommand(name) {
+		return name, fields
+	}
+	parts := strings.Split(name, "_")
+	if len(parts) == 1 {
+		return name, fields
+	}
+	if _, ok := commands[parts[0]]; !ok {
+		return name, fields
+	}
+	normalized := make([]string, 0, len(parts)+len(fields)-1)
+	normalized = append(normalized, "/"+parts[0])
+	normalized = append(normalized, parts[1:]...)
+	normalized = append(normalized, fields[1:]...)
+	return parts[0], normalized
+}
+
 func botHelpText() string {
 	return strings.TrimSpace(`
 commands:
 /unseal
 /unlock 5m
 /unlock
+/unlock_1h
 /seal
 /lock
 /status
