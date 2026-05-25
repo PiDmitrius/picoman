@@ -460,11 +460,16 @@ func cmdHosts(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host remove <name>")
+		return cmdReply{}, errors.New(hostCommandsHelp())
 	}
 	switch fields[1] {
 	case "list":
+		if len(fields) != 2 {
+			return cmdReply{}, errors.New("usage: host list")
+		}
 		return cmdHostList(c, fields)
+	case "show":
+		return cmdHostShow(c, fields[2:])
 	case "note":
 		text, err := setHostNote(fields[2:], c.cfg)
 		if err != nil {
@@ -480,16 +485,20 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		}
 		return cmdReply{text: text, html: true}, nil
 	default:
-		name := fields[1]
-		if len(fields) != 2 {
-			return cmdReply{}, errors.New("usage: host <name>")
-		}
-		target, ok := c.cfg.Target(name)
-		if !ok {
-			return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
-		}
-		return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
+		return cmdReply{}, errors.New(hostCommandsHelp())
 	}
+}
+
+func cmdHostShow(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 1 {
+		return cmdReply{}, errors.New("usage: host show <name>")
+	}
+	name := fields[0]
+	target, ok := c.cfg.Target(name)
+	if !ok {
+		return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
+	}
+	return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
 }
 
 func cmdGroupList(c cmdCtx, fields []string) (cmdReply, error) {
@@ -501,22 +510,33 @@ func cmdGroupList(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: group @<group> | group add @<group> <host> | group remove @<group> <host>")
+		return cmdReply{}, errors.New(groupCommandsHelp())
 	}
 	switch fields[1] {
+	case "list":
+		if len(fields) != 2 {
+			return cmdReply{}, errors.New("usage: group list")
+		}
+		return cmdGroupList(c, fields)
+	case "show":
+		return cmdGroupShow(c, fields[2:])
 	case "add":
 		return cmdGroupModify(c, "add", fields[2:])
 	case "rm", "remove":
 		return cmdGroupModify(c, "remove", fields[2:])
 	}
-	group, err := parseGroupSelector(fields[1])
+	return cmdReply{}, errors.New(groupCommandsHelp())
+}
+
+func cmdGroupShow(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 1 {
+		return cmdReply{}, errors.New("usage: group show @<group>")
+	}
+	group, err := parseGroupSelector(fields[0])
 	if err != nil {
 		return cmdReply{}, err
 	}
-	if len(fields) == 2 {
-		return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
-	}
-	return cmdReply{}, errors.New("usage: group @<group> | group add @<group> <host> | group remove @<group> <host>")
+	return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
 }
 
 func cmdGroupModify(c cmdCtx, action string, fields []string) (cmdReply, error) {
@@ -722,12 +742,13 @@ commands:
 /status
 /update
 /host list
-/host <name>
+/host show <name>
 /host note <name> [note]
 /host add
 /host remove <name>
 /groups
-/group @<group>
+/group list
+/group show @<group>
 /group add @<group> <host>
 /group remove @<group> <host>
 /run <target> <command>

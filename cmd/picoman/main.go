@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.96"
+const version = "v0.1.97"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -102,16 +102,18 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  put <target> <local> [<remote>]    Upload to target work dir")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Host registry:")
-	fmt.Fprintln(os.Stderr, "  host                               List configured targets")
-	fmt.Fprintln(os.Stderr, "  host <name>                        Show one target")
+	fmt.Fprintln(os.Stderr, "  hosts                              List configured targets")
+	fmt.Fprintln(os.Stderr, "  host list                          List configured targets")
+	fmt.Fprintln(os.Stderr, "  host show <name>                   Show one target")
 	fmt.Fprintln(os.Stderr, "  host add                           Print bootstrap snippet (placeholder HOSTNAME)")
 	fmt.Fprintln(os.Stderr, "  host add <name>                    Print bootstrap snippet for <name>")
 	fmt.Fprintln(os.Stderr, "  host add <name> <user@host:port> <keytype> <key>")
 	fmt.Fprintln(os.Stderr, "                                     Register target with pinned host key")
 	fmt.Fprintln(os.Stderr, "  host note <name> [<note>]          Set or clear free-form note")
 	fmt.Fprintln(os.Stderr, "  host remove <name>                 Remove target")
-	fmt.Fprintln(os.Stderr, "  groups                             List groups")
-	fmt.Fprintln(os.Stderr, "  group @<group>                     Show group hosts")
+	fmt.Fprintln(os.Stderr, "  groups                             List configured groups")
+	fmt.Fprintln(os.Stderr, "  group list                         List configured groups")
+	fmt.Fprintln(os.Stderr, "  group show @<group>                Show group hosts")
 	fmt.Fprintln(os.Stderr, "  group add @<group> <host>          Add host to group")
 	fmt.Fprintln(os.Stderr, "  group remove @<group> <host>       Remove host from group")
 	fmt.Fprintln(os.Stderr)

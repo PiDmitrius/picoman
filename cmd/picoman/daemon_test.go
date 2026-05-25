@@ -139,11 +139,32 @@ func TestCmdHostRemoveCommand(t *testing.T) {
 	}
 }
 
-func TestCmdHostRejectsObjectAction(t *testing.T) {
+func TestCmdHostShowCommand(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example"},
 		},
+	}
+	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "show", "host"})
+	if err != nil {
+		t.Fatalf("cmdHost returned error: %v", err)
+	}
+	if reply.text == "" {
+		t.Fatal("cmdHost returned empty reply")
+	}
+}
+
+func TestCmdHostRejectsMissingOrObjectCommand(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host"}); err == nil {
+		t.Fatal("cmdHost accepted missing command")
+	}
+	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host"}); err == nil {
+		t.Fatal("cmdHost accepted object without show command")
 	}
 	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "remove"}); err == nil {
 		t.Fatal("cmdHost accepted object action")
@@ -171,12 +192,33 @@ func TestCmdGroupCommands(t *testing.T) {
 	}
 }
 
+func TestCmdGroupShowCommand(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
+		},
+	}
+	reply, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "show", "@web"})
+	if err != nil {
+		t.Fatalf("cmdGroup returned error: %v", err)
+	}
+	if reply.text == "" {
+		t.Fatal("cmdGroup returned empty reply")
+	}
+}
+
 func TestCmdGroupRejectsObjectAction(t *testing.T) {
 	cfg := &config.Config{
 		HostDB: t.TempDir() + "/hosts.json",
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example"},
 		},
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group"}); err == nil {
+		t.Fatal("cmdGroup accepted missing command")
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "@web"}); err == nil {
+		t.Fatal("cmdGroup accepted object without show command")
 	}
 	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "@web", "add", "host"}); err == nil {
 		t.Fatal("cmdGroup accepted object action")

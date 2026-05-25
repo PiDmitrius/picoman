@@ -564,12 +564,22 @@ func runLogLevel(args []string) {
 
 func runHost(args []string) {
 	if len(args) == 0 {
-		runHostList()
-		return
+		fmt.Fprintln(os.Stderr, hostCommandsHelp())
+		os.Exit(1)
 	}
 	switch args[0] {
 	case "list":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: picoman host list")
+			os.Exit(1)
+		}
 		runHostList()
+	case "show":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: picoman host show <name>")
+			os.Exit(1)
+		}
+		runHostShow(args[1])
 	case "add":
 		runHostAdd(args[1:])
 	case "note":
@@ -577,13 +587,20 @@ func runHost(args []string) {
 	case "rm", "remove":
 		runHostRemove(args[1:])
 	default:
-		if len(args) == 1 {
-			runHostShow(args[0])
-			return
-		}
-		fmt.Fprintln(os.Stderr, "usage: picoman host <name>")
+		fmt.Fprintln(os.Stderr, hostCommandsHelp())
 		os.Exit(1)
 	}
+}
+
+func hostCommandsHelp() string {
+	return strings.Join([]string{
+		"host commands:",
+		"  host list",
+		"  host show <name>",
+		"  host add [<name> [<user>@<host>:<port> <keytype> <key>]]",
+		"  host note <name> [note]",
+		"  host remove <name>",
+	}, "\n")
 }
 
 func runHosts(args []string) {
@@ -696,11 +713,31 @@ func runHostRemove(args []string) {
 }
 
 func runGroup(args []string) {
-	if len(args) == 0 || args[0] == "list" {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, groupCommandsHelp())
+		os.Exit(1)
+	}
+	if args[0] == "list" {
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: picoman group list")
+			os.Exit(1)
+		}
 		runGroupList()
 		return
 	}
 	switch args[0] {
+	case "show":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: picoman group show @<group>")
+			os.Exit(1)
+		}
+		group, err := parseGroupSelector(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		runGroupShow(group)
+		return
 	case "add":
 		runGroupModify("add", args[1:])
 		return
@@ -708,17 +745,18 @@ func runGroup(args []string) {
 		runGroupModify("remove", args[1:])
 		return
 	}
-	group, err := parseGroupSelector(args[0])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if len(args) == 1 {
-		runGroupShow(group)
-		return
-	}
-	fmt.Fprintln(os.Stderr, "usage: picoman group @<group> | group add @<group> <host> | group remove @<group> <host>")
+	fmt.Fprintln(os.Stderr, groupCommandsHelp())
 	os.Exit(1)
+}
+
+func groupCommandsHelp() string {
+	return strings.Join([]string{
+		"group commands:",
+		"  group list",
+		"  group show @<group>",
+		"  group add @<group> <host>",
+		"  group remove @<group> <host>",
+	}, "\n")
 }
 
 func runGroupModify(action string, args []string) {
