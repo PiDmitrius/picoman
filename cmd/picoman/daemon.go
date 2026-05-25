@@ -125,7 +125,7 @@ func runDaemon() {
 			if upd.Message.Text == "" {
 				continue
 			}
-			handleMessage(ctx, out, cfg, st, bot, upd.Message)
+			handleMessage(ctx, out, cfg, st, audit, bot, upd.Message)
 		}
 		if len(updates) > 0 {
 			// SetTelegramOffset emits its own alert (via outbox sink) on error.
@@ -335,9 +335,10 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 }
 
 type cmdCtx struct {
-	ctx context.Context
-	cfg *config.Config
-	st  *agent.State
+	ctx   context.Context
+	cfg   *config.Config
+	st    *agent.State
+	audit *auditState
 }
 
 type cmdReply struct {
@@ -355,23 +356,24 @@ type cmdEntry struct {
 const builtinAllGroup = "all"
 
 var commands = map[string]cmdEntry{
-	"start":  {fn: cmdHelp},
-	"help":   {fn: cmdHelp},
-	"status": {fn: cmdStatus},
-	"hosts":  {fn: cmdHostList},
-	"host":   {fn: cmdHost},
-	"groups": {fn: cmdGroups},
-	"unseal": {fn: cmdUnseal, async: true},
-	"unlock": {fn: cmdUnlock},
-	"seal":   {fn: cmdSeal},
-	"lock":   {fn: cmdLock},
-	"update": {fn: cmdUpdate, async: true},
-	"run":    {fn: cmdRun, async: true},
-	"get":    {fn: cmdGet, async: true},
-	"put":    {fn: cmdPut, async: true},
+	"start":    {fn: cmdHelp},
+	"help":     {fn: cmdHelp},
+	"status":   {fn: cmdStatus},
+	"hosts":    {fn: cmdHostList},
+	"host":     {fn: cmdHost},
+	"groups":   {fn: cmdGroups},
+	"unseal":   {fn: cmdUnseal, async: true},
+	"unlock":   {fn: cmdUnlock},
+	"seal":     {fn: cmdSeal},
+	"lock":     {fn: cmdLock},
+	"update":   {fn: cmdUpdate, async: true},
+	"run":      {fn: cmdRun, async: true},
+	"get":      {fn: cmdGet, async: true},
+	"put":      {fn: cmdPut, async: true},
+	"loglevel": {fn: cmdLogLevel},
 }
 
-func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
+func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, audit *auditState, bot *tg.Client, msg tg.Message) {
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		// Silent drop: replying "denied" leaks bot existence to anyone who
 		// pings the chat. Journal record is enough for forensics.
@@ -396,7 +398,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		return
 	}
 
-	c := cmdCtx{ctx: ctx, cfg: cfg, st: st}
+	c := cmdCtx{ctx: ctx, cfg: cfg, st: st, audit: audit}
 	run := func() {
 		reply, err := entry.fn(c, fields)
 		logCommand(msg, err)
@@ -636,6 +638,17 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 	}, err
 }
 
+func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 2 {
+		return cmdReply{}, errors.New("usage: loglevel <chat|all>")
+	}
+	level := fields[1]
+	if !c.audit.SetLogLevel(level) {
+		return cmdReply{}, errors.New("bad loglevel")
+	}
+	return cmdReply{text: "⚙️ loglevel " + level}, nil
+}
+
 func commandName(s string) string {
 	return strings.TrimLeft(strings.ToLower(s), "/")
 }
@@ -681,6 +694,7 @@ commands:
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
+/loglevel <chat|all>
 `)
 }
 

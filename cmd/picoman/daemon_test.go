@@ -93,3 +93,17 @@ func TestBuiltinAllGroupListsEnabledHosts(t *testing.T) {
 		t.Fatalf("groupHosts(all) = %#v, want %#v", got, want)
 	}
 }
+
+func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
+	audit := newAuditState("chat")
+	reply, err := cmdLogLevel(cmdCtx{audit: audit}, []string{"/loglevel", "all"})
+	if err != nil {
+		t.Fatalf("cmdLogLevel returned error: %v", err)
+	}
+	if reply.text != "⚙️ loglevel all" {
+		t.Fatalf("reply = %q, want loglevel confirmation", reply.text)
+	}
+	if got := audit.LogLevel(); got != "all" {
+		t.Fatalf("LogLevel = %q, want all", got)
+	}
+}
