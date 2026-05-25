@@ -49,7 +49,7 @@ func (c *Config) Target(name string) (Target, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	t, ok := c.Targets[name]
-	return t, ok
+	return cloneTarget(t), ok
 }
 
 func (c *Config) HostNames() []string {
@@ -98,7 +98,7 @@ func (c *Config) AllTargets() map[string]Target {
 	defer c.mu.RUnlock()
 	out := make(map[string]Target, len(c.Targets))
 	for k, v := range c.Targets {
-		out[k] = v
+		out[k] = cloneTarget(v)
 	}
 	return out
 }
@@ -143,7 +143,7 @@ func (c *Config) AddHostGroup(name, group string) (Target, error) {
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
 	if !hasGroup(t.Groups, group) {
-		t.Groups = append(t.Groups, group)
+		t.Groups = append(append([]string(nil), t.Groups...), group)
 		sort.Strings(t.Groups)
 	}
 	c.Targets[name] = t
@@ -163,7 +163,7 @@ func (c *Config) RemoveHostGroup(name, group string) (Target, error) {
 	if !ok {
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
-	groups := t.Groups[:0]
+	groups := make([]string, 0, len(t.Groups))
 	for _, g := range t.Groups {
 		if g != group {
 			groups = append(groups, g)
@@ -425,4 +425,9 @@ func uniqueSorted(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func cloneTarget(t Target) Target {
+	t.Groups = append([]string(nil), t.Groups...)
+	return t
 }
