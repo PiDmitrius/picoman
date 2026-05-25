@@ -56,6 +56,8 @@ func (s *controlServer) handlers() map[string]controlHandler {
 		"PUT":       s.put,
 		"HOST_ADD":  bind(s.hostAdd),
 		"HOST_NOTE": bind(s.hostNote),
+		"GROUP_ADD": bind(s.groupAdd),
+		"GROUP_RM":  bind(s.groupRemove),
 	}
 }
 
@@ -319,7 +321,7 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
-	output, exitCode, err := runTarget(ctx, s.cfg, s.st, host, command)
+	output, exitCode, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
 		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
@@ -375,6 +377,26 @@ func (s *controlServer) hostNote(args [][]byte) ([][]byte, error) {
 		note = string(args[1])
 	}
 	if _, err := s.cfg.SetHostNote(name, note); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (s *controlServer) groupAdd(args [][]byte) ([][]byte, error) {
+	if len(args) != 2 {
+		return nil, errors.New("usage: GROUP_ADD <group> <host>")
+	}
+	if _, err := s.cfg.AddHostGroup(string(args[1]), string(args[0])); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (s *controlServer) groupRemove(args [][]byte) ([][]byte, error) {
+	if len(args) != 2 {
+		return nil, errors.New("usage: GROUP_RM <group> <host>")
+	}
+	if _, err := s.cfg.RemoveHostGroup(string(args[1]), string(args[0])); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -594,6 +616,9 @@ func runHostShow(name string) {
 	if t.Note != "" {
 		fmt.Println(t.Note)
 	}
+	if len(t.Groups) > 0 {
+		fmt.Println("groups: " + strings.Join(t.Groups, ", "))
+	}
 }
 
 func runHostAdd(args []string) {
@@ -630,6 +655,61 @@ func runHostNote(args []string) {
 		os.Exit(1)
 	}
 	simpleControl("HOST_NOTE", args[0], strings.Join(args[1:], " "))
+}
+
+func runGroups(args []string) {
+	if len(args) == 0 || args[0] == "list" {
+		runGroupList()
+		return
+	}
+	group, err := parseGroupSelector(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if len(args) == 1 {
+		runGroupShow(group)
+		return
+	}
+	if len(args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman groups @<group> [add|rm <host>]")
+		os.Exit(1)
+	}
+	switch args[1] {
+	case "add":
+		simpleControl("GROUP_ADD", group, args[2])
+	case "rm", "remove":
+		simpleControl("GROUP_RM", group, args[2])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: picoman groups @<group> [add|rm <host>]")
+		os.Exit(1)
+	}
+}
+
+func runGroupList() {
+	cfg := loadHosts()
+	names := cfg.GroupNames()
+	if len(names) == 0 {
+		fmt.Println("groups list empty")
+		return
+	}
+	fmt.Println("groups list")
+	for _, name := range names {
+		fmt.Println("- @" + name)
+	}
+}
+
+func runGroupShow(group string) {
+	cfg := loadHosts()
+	names := cfg.HostsInGroup(group)
+	if len(names) == 0 {
+		fmt.Println("groups @" + group + " empty")
+		return
+	}
+	fmt.Println("groups @" + group)
+	for _, name := range names {
+		fmt.Println("- " + name)
+	}
 }
 
 func runAskpass() {

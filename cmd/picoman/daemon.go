@@ -358,6 +358,7 @@ var commands = map[string]cmdEntry{
 	"status": {fn: cmdStatus},
 	"hosts":  {fn: cmdHostList},
 	"host":   {fn: cmdHost},
+	"groups": {fn: cmdGroups},
 	"unseal": {fn: cmdUnseal, async: true},
 	"unlock": {fn: cmdUnlock},
 	"seal":   {fn: cmdSeal},
@@ -467,6 +468,37 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 			return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
 		}
 		return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
+	}
+}
+
+func cmdGroups(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) == 1 || fields[1] == "list" {
+		return cmdReply{text: infoText(groupsText(c.cfg)), html: true}, nil
+	}
+	group, err := parseGroupSelector(fields[1])
+	if err != nil {
+		return cmdReply{}, err
+	}
+	if len(fields) == 2 {
+		return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
+	}
+	if len(fields) != 4 {
+		return cmdReply{}, errors.New("usage: groups @<group> [add|rm <host>]")
+	}
+	host := fields[3]
+	switch fields[2] {
+	case "add":
+		if _, err := c.cfg.AddHostGroup(host, group); err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: successText("groups @" + html.EscapeString(group) + "\nadded " + hostNameText(host)), html: true}, nil
+	case "rm", "remove":
+		if _, err := c.cfg.RemoveHostGroup(host, group); err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: successText("groups @" + html.EscapeString(group) + "\nremoved " + hostNameText(host)), html: true}, nil
+	default:
+		return cmdReply{}, errors.New("usage: groups @<group> [add|rm <host>]")
 	}
 }
 
@@ -637,6 +669,10 @@ commands:
 /host <name>
 /host note <name> [note]
 /host add
+/groups
+/groups @<group>
+/groups @<group> add <host>
+/groups @<group> rm <host>
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
@@ -741,13 +777,45 @@ func hostText(name string, target config.Target) string {
 	if target.Note != "" {
 		note = "\n" + html.EscapeString(target.Note)
 	}
+	groups := ""
+	if len(target.Groups) > 0 {
+		escaped := make([]string, 0, len(target.Groups))
+		for _, group := range target.Groups {
+			escaped = append(escaped, "@"+html.EscapeString(group))
+		}
+		groups = "\ngroups: " + strings.Join(escaped, ", ")
+	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
 		html.EscapeString(target.User),
 		html.EscapeString(target.Host),
 		port,
-		state+note,
+		state+note+groups,
 	)
+}
+
+func groupsText(cfg *config.Config) string {
+	names := cfg.GroupNames()
+	if len(names) == 0 {
+		return "groups list empty"
+	}
+	lines := []string{"groups list"}
+	for _, name := range names {
+		lines = append(lines, "- @"+html.EscapeString(name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func groupText(cfg *config.Config, group string) string {
+	names := cfg.HostsInGroup(group)
+	if len(names) == 0 {
+		return "groups @" + html.EscapeString(group) + " empty"
+	}
+	lines := []string{"groups @" + html.EscapeString(group)}
+	for _, name := range names {
+		lines = append(lines, "- "+hostNameText(name))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
@@ -801,6 +869,7 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		Port:      port,
 		PublicKey: publicKey,
 		Note:      existing.Note,
+		Groups:    existing.Groups,
 	}
 	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
@@ -836,6 +905,17 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 
 func hostNameText(name string) string {
 	return "<b>" + html.EscapeString(name) + "</b>"
+}
+
+func parseGroupSelector(value string) (string, error) {
+	group := strings.TrimPrefix(value, "@")
+	if group == value {
+		return "", errors.New("group must start with @")
+	}
+	if !config.ValidName(group) {
+		return "", fmt.Errorf("bad group name %q", group)
+	}
+	return group, nil
 }
 
 func parseTargetAddress(value string) (string, string, int, error) {
@@ -901,7 +981,7 @@ func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	}
 	target = fields[1]
 	command = strings.Join(fields[2:], " ")
-	output, exitCode, err = runTarget(ctx, cfg, st, target, command)
+	output, exitCode, err = runTargetSelector(ctx, cfg, st, target, command)
 	return output, command, target, exitCode, err
 }
 
@@ -944,6 +1024,55 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 		return "", 0, err
 	}
 	return runSSH(ctx, st.Socket(), t, command)
+}
+
+func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
+	if !strings.HasPrefix(selector, "@") {
+		return runTarget(ctx, cfg, st, selector, command)
+	}
+	group, err := parseGroupSelector(selector)
+	if err != nil {
+		return "", 0, err
+	}
+	hosts := cfg.HostsInGroup(group)
+	if len(hosts) == 0 {
+		return "", 0, fmt.Errorf("group %q is empty", selector)
+	}
+	if !st.IsUnlocked() {
+		return "", 0, errors.New("key is locked")
+	}
+	var b strings.Builder
+	finalCode := 0
+	for i, host := range hosts {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("== ")
+		b.WriteString(host)
+		b.WriteString(" ==\n")
+		hostOutput, code, runErr := runTarget(ctx, cfg, st, host, command)
+		if hostOutput != "" {
+			b.WriteString(hostOutput)
+			b.WriteString("\n")
+		}
+		if runErr != nil {
+			b.WriteString(runErr.Error())
+			if finalCode == 0 {
+				finalCode = 255
+			}
+			continue
+		}
+		if code != 0 {
+			b.WriteString("exit status ")
+			b.WriteString(strconv.Itoa(code))
+			if finalCode == 0 {
+				finalCode = code
+			}
+		} else if hostOutput == "" {
+			b.WriteString("ok")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n"), finalCode, nil
 }
 
 func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, error) {
