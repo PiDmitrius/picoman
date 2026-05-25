@@ -577,7 +577,16 @@ func runHost(args []string) {
 	case "rm", "remove":
 		runHostRemove(args[1:])
 	default:
-		runHostShow(args[0])
+		if len(args) == 1 {
+			runHostShow(args[0])
+			return
+		}
+		if len(args) == 2 && (args[1] == "rm" || args[1] == "remove") {
+			runHostRemove(args[:1])
+			return
+		}
+		fmt.Fprintln(os.Stderr, "usage: picoman host <name> [rm]")
+		os.Exit(1)
 	}
 }
 

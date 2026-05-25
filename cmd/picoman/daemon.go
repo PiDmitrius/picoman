@@ -460,7 +460,7 @@ func cmdHosts(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host rm <name>")
+		return cmdReply{}, errors.New("usage: host <name> [rm] | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host rm <name>")
 	}
 	switch fields[1] {
 	case "list":
@@ -481,6 +481,16 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{text: text, html: true}, nil
 	default:
 		name := fields[1]
+		if len(fields) == 3 && (fields[2] == "rm" || fields[2] == "remove") {
+			text, err := removeHost([]string{name}, c.cfg)
+			if err != nil {
+				return cmdReply{html: true}, err
+			}
+			return cmdReply{text: text, html: true}, nil
+		}
+		if len(fields) != 2 {
+			return cmdReply{}, errors.New("usage: host <name> [rm]")
+		}
 		target, ok := c.cfg.Target(name)
 		if !ok {
 			return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
@@ -708,6 +718,7 @@ commands:
 /host <name>
 /host note <name> [note]
 /host add
+/host <name> rm
 /host rm <name>
 /groups
 /group @<group>

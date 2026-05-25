@@ -117,3 +117,35 @@ func TestPluralListCommandsRejectObjectActions(t *testing.T) {
 		t.Fatal("cmdGroupList accepted object selector")
 	}
 }
+
+func TestCmdHostObjectRemove(t *testing.T) {
+	t.Setenv("PICOMAN_DATA_DIR", t.TempDir())
+	cfg := &config.Config{
+		HostDB:  t.TempDir() + "/hosts.json",
+		Targets: map[string]config.Target{},
+	}
+	if err := cfg.UpsertTarget("host", config.Target{User: "user", Host: "host.example"}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "remove"})
+	if err != nil {
+		t.Fatalf("cmdHost returned error: %v", err)
+	}
+	if reply.text == "" {
+		t.Fatal("cmdHost returned empty reply")
+	}
+	if _, ok := cfg.Target("host"); ok {
+		t.Fatal("host was not removed")
+	}
+}
+
+func TestCmdHostRejectsUnknownObjectAction(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "unknown"}); err == nil {
+		t.Fatal("cmdHost accepted unknown object action")
+	}
+}
