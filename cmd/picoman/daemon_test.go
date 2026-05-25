@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"picoman/internal/config"
 )
@@ -105,6 +106,32 @@ func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
 	}
 	if got := audit.LogLevel(); got != "all" {
 		t.Fatalf("LogLevel = %q, want all", got)
+	}
+}
+
+func TestDeveloperAutoUnlockTTLRequiresDeveloperDir(t *testing.T) {
+	cfg := &config.Config{MaxUnlockTTL: "2h"}
+	if _, ok := developerAutoUnlockTTL(cfg); ok {
+		t.Fatal("developerAutoUnlockTTL enabled without developer_dir")
+	}
+	cfg.DeveloperDir = "/tmp/picoman"
+	ttl, ok := developerAutoUnlockTTL(cfg)
+	if !ok {
+		t.Fatal("developerAutoUnlockTTL disabled with developer_dir")
+	}
+	if ttl != 2*time.Hour {
+		t.Fatalf("ttl = %s, want 2h", ttl)
+	}
+}
+
+func TestDeveloperAutoUnlockTTLUsesNormalizedMaxTTL(t *testing.T) {
+	cfg := &config.Config{DeveloperDir: "/tmp/picoman", MaxUnlockTTL: "bad"}
+	ttl, ok := developerAutoUnlockTTL(cfg)
+	if !ok {
+		t.Fatal("developerAutoUnlockTTL disabled with developer_dir")
+	}
+	if ttl != 15*time.Minute {
+		t.Fatalf("ttl = %s, want default 15m", ttl)
 	}
 }
 

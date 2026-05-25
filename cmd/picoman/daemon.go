@@ -254,6 +254,26 @@ func startupAutoUnseal(ctx context.Context, cfg *config.Config, st *agent.State,
 		return
 	}
 	notify(out, cfg, bot, false, unsealText())
+	startupDeveloperAutoUnlock(cfg, st, out, bot)
+}
+
+func startupDeveloperAutoUnlock(cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client) {
+	ttl, ok := developerAutoUnlockTTL(cfg)
+	if !ok {
+		return
+	}
+	if err := st.Unlock(ttl); err != nil {
+		notify(out, cfg, bot, false, errorText("unlock failed: "+err.Error()))
+		return
+	}
+	notify(out, cfg, bot, false, unlockedText(st))
+}
+
+func developerAutoUnlockTTL(cfg *config.Config) (time.Duration, bool) {
+	if strings.TrimSpace(cfg.DeveloperDir) == "" {
+		return 0, false
+	}
+	return config.MaxTTL(cfg), true
 }
 
 func runUnsealCommand(ctx context.Context, cmdline string) (string, error) {
@@ -774,7 +794,11 @@ func handleUnlock(fields []string, st *agent.State) (string, error) {
 	if err := st.Unlock(ttl); err != nil {
 		return "", err
 	}
-	return "🟡 unlocked (" + leftText(st.Until()) + ")", nil
+	return unlockedText(st), nil
+}
+
+func unlockedText(st *agent.State) string {
+	return "🟡 unlocked (" + leftText(st.Until()) + ")"
 }
 
 func statusText(st *agent.State) string {
