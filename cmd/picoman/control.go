@@ -574,12 +574,12 @@ func runHost(args []string) {
 			os.Exit(1)
 		}
 		runHostList()
-	case "show":
+	case "info":
 		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: picoman host show <name>")
+			fmt.Fprintln(os.Stderr, "usage: picoman host info <name>")
 			os.Exit(1)
 		}
-		runHostShow(args[1])
+		runHostInfo(args[1])
 	case "add":
 		runHostAdd(args[1:])
 	case "note":
@@ -596,7 +596,7 @@ func hostCommandsHelp() string {
 	return strings.Join([]string{
 		"host commands:",
 		"  host list",
-		"  host show <name>",
+		"  host info <name>",
 		"  host add [<name> [<user>@<host>:<port> <keytype> <key>]]",
 		"  host note <name> [note]",
 		"  host remove <name>",
@@ -644,7 +644,7 @@ func runHostList() {
 	}
 }
 
-func runHostShow(name string) {
+func runHostInfo(name string) {
 	cfg := loadHosts()
 	t, ok := cfg.Target(name)
 	if !ok {
@@ -726,9 +726,9 @@ func runGroup(args []string) {
 		return
 	}
 	switch args[0] {
-	case "show":
+	case "info":
 		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: picoman group show @<group>")
+			fmt.Fprintln(os.Stderr, "usage: picoman group info @<group>")
 			os.Exit(1)
 		}
 		group, err := parseGroupSelector(args[1])
@@ -753,7 +753,7 @@ func groupCommandsHelp() string {
 	return strings.Join([]string{
 		"group commands:",
 		"  group list",
-		"  group show @<group>",
+		"  group info @<group>",
 		"  group add @<group> <host>",
 		"  group remove @<group> <host>",
 	}, "\n")

@@ -468,8 +468,8 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 			return cmdReply{}, errors.New("usage: host list")
 		}
 		return cmdHostList(c, fields)
-	case "show":
-		return cmdHostShow(c, fields[2:])
+	case "info":
+		return cmdHostInfo(c, fields[2:])
 	case "note":
 		text, err := setHostNote(fields[2:], c.cfg)
 		if err != nil {
@@ -489,9 +489,9 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	}
 }
 
-func cmdHostShow(c cmdCtx, fields []string) (cmdReply, error) {
+func cmdHostInfo(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) != 1 {
-		return cmdReply{}, errors.New("usage: host show <name>")
+		return cmdReply{}, errors.New("usage: host info <name>")
 	}
 	name := fields[0]
 	target, ok := c.cfg.Target(name)
@@ -518,8 +518,8 @@ func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 			return cmdReply{}, errors.New("usage: group list")
 		}
 		return cmdGroupList(c, fields)
-	case "show":
-		return cmdGroupShow(c, fields[2:])
+	case "info":
+		return cmdGroupInfo(c, fields[2:])
 	case "add":
 		return cmdGroupModify(c, "add", fields[2:])
 	case "rm", "remove":
@@ -528,9 +528,9 @@ func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 	return cmdReply{}, errors.New(groupCommandsHelp())
 }
 
-func cmdGroupShow(c cmdCtx, fields []string) (cmdReply, error) {
+func cmdGroupInfo(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) != 1 {
-		return cmdReply{}, errors.New("usage: group show @<group>")
+		return cmdReply{}, errors.New("usage: group info @<group>")
 	}
 	group, err := parseGroupSelector(fields[0])
 	if err != nil {
@@ -742,13 +742,13 @@ commands:
 /status
 /update
 /host list
-/host show <name>
+/host info <name>
 /host note <name> [note]
 /host add
 /host remove <name>
 /groups
 /group list
-/group show @<group>
+/group info @<group>
 /group add @<group> <host>
 /group remove @<group> <host>
 /run <target> <command>

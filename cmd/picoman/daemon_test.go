@@ -139,13 +139,13 @@ func TestCmdHostRemoveCommand(t *testing.T) {
 	}
 }
 
-func TestCmdHostShowCommand(t *testing.T) {
+func TestCmdHostInfoCommand(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example"},
 		},
 	}
-	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "show", "host"})
+	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "info", "host"})
 	if err != nil {
 		t.Fatalf("cmdHost returned error: %v", err)
 	}
@@ -164,10 +164,13 @@ func TestCmdHostRejectsMissingOrObjectCommand(t *testing.T) {
 		t.Fatal("cmdHost accepted missing command")
 	}
 	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host"}); err == nil {
-		t.Fatal("cmdHost accepted object without show command")
+		t.Fatal("cmdHost accepted object without info command")
 	}
 	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "remove"}); err == nil {
 		t.Fatal("cmdHost accepted object action")
+	}
+	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "show", "host"}); err == nil {
+		t.Fatal("cmdHost accepted old show command")
 	}
 }
 
@@ -192,13 +195,13 @@ func TestCmdGroupCommands(t *testing.T) {
 	}
 }
 
-func TestCmdGroupShowCommand(t *testing.T) {
+func TestCmdGroupInfoCommand(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
 		},
 	}
-	reply, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "show", "@web"})
+	reply, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "info", "@web"})
 	if err != nil {
 		t.Fatalf("cmdGroup returned error: %v", err)
 	}
@@ -218,9 +221,12 @@ func TestCmdGroupRejectsObjectAction(t *testing.T) {
 		t.Fatal("cmdGroup accepted missing command")
 	}
 	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "@web"}); err == nil {
-		t.Fatal("cmdGroup accepted object without show command")
+		t.Fatal("cmdGroup accepted object without info command")
 	}
 	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "@web", "add", "host"}); err == nil {
 		t.Fatal("cmdGroup accepted object action")
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "show", "@web"}); err == nil {
+		t.Fatal("cmdGroup accepted old show command")
 	}
 }

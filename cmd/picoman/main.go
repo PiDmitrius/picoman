@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.97"
+const version = "v0.1.98"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -104,7 +104,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Host registry:")
 	fmt.Fprintln(os.Stderr, "  hosts                              List configured targets")
 	fmt.Fprintln(os.Stderr, "  host list                          List configured targets")
-	fmt.Fprintln(os.Stderr, "  host show <name>                   Show one target")
+	fmt.Fprintln(os.Stderr, "  host info <name>                   Show one target")
 	fmt.Fprintln(os.Stderr, "  host add                           Print bootstrap snippet (placeholder HOSTNAME)")
 	fmt.Fprintln(os.Stderr, "  host add <name>                    Print bootstrap snippet for <name>")
 	fmt.Fprintln(os.Stderr, "  host add <name> <user@host:port> <keytype> <key>")
@@ -113,7 +113,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  host remove <name>                 Remove target")
 	fmt.Fprintln(os.Stderr, "  groups                             List configured groups")
 	fmt.Fprintln(os.Stderr, "  group list                         List configured groups")
-	fmt.Fprintln(os.Stderr, "  group show @<group>                Show group hosts")
+	fmt.Fprintln(os.Stderr, "  group info @<group>                Show group hosts")
 	fmt.Fprintln(os.Stderr, "  group add @<group> <host>          Add host to group")
 	fmt.Fprintln(os.Stderr, "  group remove @<group> <host>       Remove host from group")
 	fmt.Fprintln(os.Stderr)
