@@ -125,7 +125,7 @@ func runDaemon() {
 			if upd.Message.Text == "" {
 				continue
 			}
-			handleMessage(ctx, out, cfg, st, bot, upd.Message)
+			handleMessage(ctx, out, cfg, st, audit, bot, upd.Message)
 		}
 		if len(updates) > 0 {
 			// SetTelegramOffset emits its own alert (via outbox sink) on error.
@@ -254,6 +254,26 @@ func startupAutoUnseal(ctx context.Context, cfg *config.Config, st *agent.State,
 		return
 	}
 	notify(out, cfg, bot, false, unsealText())
+	startupDeveloperAutoUnlock(cfg, st, out, bot)
+}
+
+func startupDeveloperAutoUnlock(cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client) {
+	ttl, ok := developerAutoUnlockTTL(cfg)
+	if !ok {
+		return
+	}
+	if err := st.Unlock(ttl); err != nil {
+		notify(out, cfg, bot, false, errorText("unlock failed: "+err.Error()))
+		return
+	}
+	notify(out, cfg, bot, false, unlockedText(st))
+}
+
+func developerAutoUnlockTTL(cfg *config.Config) (time.Duration, bool) {
+	if strings.TrimSpace(cfg.DeveloperDir) == "" {
+		return 0, false
+	}
+	return config.MaxTTL(cfg), true
 }
 
 func runUnsealCommand(ctx context.Context, cmdline string) (string, error) {
@@ -335,9 +355,10 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 }
 
 type cmdCtx struct {
-	ctx context.Context
-	cfg *config.Config
-	st  *agent.State
+	ctx   context.Context
+	cfg   *config.Config
+	st    *agent.State
+	audit *auditState
 }
 
 type cmdReply struct {
@@ -352,23 +373,28 @@ type cmdEntry struct {
 	async bool
 }
 
+const builtinAllGroup = "all"
+
 var commands = map[string]cmdEntry{
-	"start":  {fn: cmdHelp},
-	"help":   {fn: cmdHelp},
-	"status": {fn: cmdStatus},
-	"hosts":  {fn: cmdHostList},
-	"host":   {fn: cmdHost},
-	"unseal": {fn: cmdUnseal, async: true},
-	"unlock": {fn: cmdUnlock},
-	"seal":   {fn: cmdSeal},
-	"lock":   {fn: cmdLock},
-	"update": {fn: cmdUpdate, async: true},
-	"run":    {fn: cmdRun, async: true},
-	"get":    {fn: cmdGet, async: true},
-	"put":    {fn: cmdPut, async: true},
+	"start":    {fn: cmdHelp},
+	"help":     {fn: cmdHelp},
+	"status":   {fn: cmdStatus},
+	"hosts":    {fn: cmdHosts},
+	"host":     {fn: cmdHost},
+	"groups":   {fn: cmdGroupList},
+	"group":    {fn: cmdGroup},
+	"unseal":   {fn: cmdUnseal, async: true},
+	"unlock":   {fn: cmdUnlock},
+	"seal":     {fn: cmdSeal},
+	"lock":     {fn: cmdLock},
+	"update":   {fn: cmdUpdate, async: true},
+	"run":      {fn: cmdRun, async: true},
+	"get":      {fn: cmdGet, async: true},
+	"put":      {fn: cmdPut, async: true},
+	"loglevel": {fn: cmdLogLevel},
 }
 
-func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, bot *tg.Client, msg tg.Message) {
+func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, audit *auditState, bot *tg.Client, msg tg.Message) {
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		// Silent drop: replying "denied" leaks bot existence to anyone who
 		// pings the chat. Journal record is enough for forensics.
@@ -393,7 +419,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		return
 	}
 
-	c := cmdCtx{ctx: ctx, cfg: cfg, st: st}
+	c := cmdCtx{ctx: ctx, cfg: cfg, st: st, audit: audit}
 	run := func() {
 		reply, err := entry.fn(c, fields)
 		logCommand(msg, err)
@@ -445,13 +471,25 @@ func cmdHostList(c cmdCtx, _ []string) (cmdReply, error) {
 	return cmdReply{text: infoText(hostsText(c.cfg)), html: true}, nil
 }
 
+func cmdHosts(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) == 1 || fields[1] == "list" {
+		return cmdHostList(c, fields)
+	}
+	return cmdReply{}, errors.New("usage: hosts")
+}
+
 func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]]")
+		return cmdReply{}, errors.New(hostCommandsHelp())
 	}
 	switch fields[1] {
 	case "list":
+		if len(fields) != 2 {
+			return cmdReply{}, errors.New("usage: host list")
+		}
 		return cmdHostList(c, fields)
+	case "info":
+		return cmdHostInfo(c, fields[2:])
 	case "note":
 		text, err := setHostNote(fields[2:], c.cfg)
 		if err != nil {
@@ -460,13 +498,92 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{text: text, html: true}, nil
 	case "add":
 		return hostAdd(c.cfg, fields[2:])
-	default:
-		name := fields[1]
-		target, ok := c.cfg.Target(name)
-		if !ok {
-			return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
+	case "rm", "remove":
+		text, err := removeHost(fields[2:], c.cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
 		}
-		return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
+		return cmdReply{text: text, html: true}, nil
+	default:
+		return cmdReply{}, errors.New(hostCommandsHelp())
+	}
+}
+
+func cmdHostInfo(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 1 {
+		return cmdReply{}, errors.New("usage: host info <name>")
+	}
+	name := fields[0]
+	target, ok := c.cfg.Target(name)
+	if !ok {
+		return cmdReply{text: "❌ unknown host " + hostNameText(name), html: true}, fmt.Errorf("unknown host %q", name)
+	}
+	return cmdReply{text: infoText(hostText(name, target)), html: true}, nil
+}
+
+func cmdGroupList(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) == 1 || fields[1] == "list" {
+		return cmdReply{text: infoText(groupsText(c.cfg)), html: true}, nil
+	}
+	return cmdReply{}, errors.New("usage: groups")
+}
+
+func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) < 2 {
+		return cmdReply{}, errors.New(groupCommandsHelp())
+	}
+	switch fields[1] {
+	case "list":
+		if len(fields) != 2 {
+			return cmdReply{}, errors.New("usage: group list")
+		}
+		return cmdGroupList(c, fields)
+	case "info":
+		return cmdGroupInfo(c, fields[2:])
+	case "add":
+		return cmdGroupModify(c, "add", fields[2:])
+	case "rm", "remove":
+		return cmdGroupModify(c, "remove", fields[2:])
+	}
+	return cmdReply{}, errors.New(groupCommandsHelp())
+}
+
+func cmdGroupInfo(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 1 {
+		return cmdReply{}, errors.New("usage: group info @<group>")
+	}
+	group, err := parseGroupSelector(fields[0])
+	if err != nil {
+		return cmdReply{}, err
+	}
+	return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
+}
+
+func cmdGroupModify(c cmdCtx, action string, fields []string) (cmdReply, error) {
+	if len(fields) != 2 {
+		return cmdReply{}, errors.New("usage: group " + action + " @<group> <host>")
+	}
+	group, err := parseGroupSelector(fields[0])
+	if err != nil {
+		return cmdReply{}, err
+	}
+	if group == builtinAllGroup {
+		return cmdReply{}, errors.New("cannot modify built-in group @all")
+	}
+	host := fields[1]
+	switch action {
+	case "add":
+		if _, err := c.cfg.AddHostGroup(host, group); err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nadded " + hostNameText(host)), html: true}, nil
+	case "remove":
+		if _, err := c.cfg.RemoveHostGroup(host, group); err != nil {
+			return cmdReply{}, err
+		}
+		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nremoved " + hostNameText(host)), html: true}, nil
+	default:
+		return cmdReply{}, errors.New("usage: group add @<group> <host> | group remove @<group> <host>")
 	}
 }
 
@@ -599,6 +716,17 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 	}, err
 }
 
+func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) != 2 {
+		return cmdReply{}, errors.New("usage: loglevel <chat|all>")
+	}
+	level := fields[1]
+	if !c.audit.SetLogLevel(level) {
+		return cmdReply{}, errors.New("bad loglevel")
+	}
+	return cmdReply{text: "⚙️ loglevel " + level}, nil
+}
+
 func commandName(s string) string {
 	return strings.TrimLeft(strings.ToLower(s), "/")
 }
@@ -634,12 +762,19 @@ commands:
 /status
 /update
 /host list
-/host <name>
+/host info <name>
 /host note <name> [note]
 /host add
+/host remove <name>
+/groups
+/group list
+/group info @<group>
+/group add @<group> <host>
+/group remove @<group> <host>
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
+/loglevel <chat|all>
 `)
 }
 
@@ -659,7 +794,11 @@ func handleUnlock(fields []string, st *agent.State) (string, error) {
 	if err := st.Unlock(ttl); err != nil {
 		return "", err
 	}
-	return "🟡 unlocked (" + leftText(st.Until()) + ")", nil
+	return unlockedText(st), nil
+}
+
+func unlockedText(st *agent.State) string {
+	return "🟡 unlocked (" + leftText(st.Until()) + ")"
 }
 
 func statusText(st *agent.State) string {
@@ -741,13 +880,60 @@ func hostText(name string, target config.Target) string {
 	if target.Note != "" {
 		note = "\n" + html.EscapeString(target.Note)
 	}
+	groups := ""
+	if len(target.Groups) > 0 {
+		escaped := make([]string, 0, len(target.Groups))
+		for _, group := range target.Groups {
+			escaped = append(escaped, "@"+html.EscapeString(group))
+		}
+		groups = "\ngroups: " + strings.Join(escaped, ", ")
+	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
 		html.EscapeString(target.User),
 		html.EscapeString(target.Host),
 		port,
-		state+note,
+		state+note+groups,
 	)
+}
+
+func groupsText(cfg *config.Config) string {
+	names := cfg.GroupNames()
+	lines := []string{"groups list", "- @all"}
+	for _, name := range names {
+		if name == builtinAllGroup {
+			continue
+		}
+		lines = append(lines, "- @"+html.EscapeString(name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func groupText(cfg *config.Config, group string) string {
+	names := groupHosts(cfg, group)
+	if len(names) == 0 {
+		return "group @" + html.EscapeString(group) + " empty"
+	}
+	lines := []string{"group @" + html.EscapeString(group)}
+	for _, name := range names {
+		lines = append(lines, "- "+hostNameText(name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func groupHosts(cfg *config.Config, group string) []string {
+	if group != builtinAllGroup {
+		return cfg.HostsInGroup(group)
+	}
+	targets := cfg.AllTargets()
+	names := make([]string, 0, len(targets))
+	for name, target := range targets {
+		if !target.Disabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
@@ -801,6 +987,7 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		Port:      port,
 		PublicKey: publicKey,
 		Note:      existing.Note,
+		Groups:    existing.Groups,
 	}
 	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
@@ -834,8 +1021,33 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 	return successText("host note\n" + hostNameText(name) + "\n" + html.EscapeString(target.Note)), nil
 }
 
+func removeHost(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) != 1 {
+		return "", errors.New("usage: host remove <name>")
+	}
+	name := fields[0]
+	if err := cfg.RemoveTarget(name); err != nil {
+		return "", err
+	}
+	if err := writeKnownHosts(cfg); err != nil {
+		return "", fmt.Errorf("write known_hosts: %w", err)
+	}
+	return successText("host removed\n" + hostNameText(name)), nil
+}
+
 func hostNameText(name string) string {
 	return "<b>" + html.EscapeString(name) + "</b>"
+}
+
+func parseGroupSelector(value string) (string, error) {
+	group := strings.TrimPrefix(value, "@")
+	if group == value {
+		return "", errors.New("group must start with @")
+	}
+	if !config.ValidName(group) {
+		return "", fmt.Errorf("bad group name %q", group)
+	}
+	return group, nil
 }
 
 func parseTargetAddress(value string) (string, string, int, error) {
@@ -901,7 +1113,7 @@ func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	}
 	target = fields[1]
 	command = strings.Join(fields[2:], " ")
-	output, exitCode, err = runTarget(ctx, cfg, st, target, command)
+	output, exitCode, err = runTargetSelector(ctx, cfg, st, target, command)
 	return output, command, target, exitCode, err
 }
 
@@ -944,6 +1156,55 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 		return "", 0, err
 	}
 	return runSSH(ctx, st.Socket(), t, command)
+}
+
+func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
+	if !strings.HasPrefix(selector, "@") {
+		return runTarget(ctx, cfg, st, selector, command)
+	}
+	group, err := parseGroupSelector(selector)
+	if err != nil {
+		return "", 0, err
+	}
+	hosts := groupHosts(cfg, group)
+	if len(hosts) == 0 {
+		return "", 0, fmt.Errorf("group %q is empty", selector)
+	}
+	if !st.IsUnlocked() {
+		return "", 0, errors.New("key is locked")
+	}
+	var b strings.Builder
+	finalCode := 0
+	for i, host := range hosts {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("== ")
+		b.WriteString(host)
+		b.WriteString(" ==\n")
+		hostOutput, code, runErr := runTarget(ctx, cfg, st, host, command)
+		if hostOutput != "" {
+			b.WriteString(hostOutput)
+			b.WriteString("\n")
+		}
+		if runErr != nil {
+			b.WriteString(runErr.Error())
+			if finalCode == 0 {
+				finalCode = 255
+			}
+			continue
+		}
+		if code != 0 {
+			b.WriteString("exit status ")
+			b.WriteString(strconv.Itoa(code))
+			if finalCode == 0 {
+				finalCode = code
+			}
+		} else if hostOutput == "" {
+			b.WriteString("ok")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n"), finalCode, nil
 }
 
 func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, error) {

@@ -12,13 +12,14 @@ import (
 )
 
 type Target struct {
-	User      string `json:"user"`
-	Host      string `json:"host"`
-	Port      int    `json:"port,omitempty"`
-	PublicKey string `json:"public_key,omitempty"`
-	WorkDir   string `json:"work_dir,omitempty"`
-	Disabled  bool   `json:"disabled,omitempty"`
-	Note      string `json:"note,omitempty"`
+	User      string   `json:"user"`
+	Host      string   `json:"host"`
+	Port      int      `json:"port,omitempty"`
+	PublicKey string   `json:"public_key,omitempty"`
+	WorkDir   string   `json:"work_dir,omitempty"`
+	Disabled  bool     `json:"disabled,omitempty"`
+	Note      string   `json:"note,omitempty"`
+	Groups    []string `json:"groups,omitempty"`
 }
 
 type HostDB struct {
@@ -48,7 +49,7 @@ func (c *Config) Target(name string) (Target, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	t, ok := c.Targets[name]
-	return t, ok
+	return cloneTarget(t), ok
 }
 
 func (c *Config) HostNames() []string {
@@ -62,12 +63,42 @@ func (c *Config) HostNames() []string {
 	return names
 }
 
+func (c *Config) GroupNames() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seen := map[string]bool{}
+	for _, target := range c.Targets {
+		for _, group := range target.Groups {
+			seen[group] = true
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (c *Config) HostsInGroup(group string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var names []string
+	for name, target := range c.Targets {
+		if hasGroup(target.Groups, group) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (c *Config) AllTargets() map[string]Target {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make(map[string]Target, len(c.Targets))
 	for k, v := range c.Targets {
-		out[k] = v
+		out[k] = cloneTarget(v)
 	}
 	return out
 }
@@ -76,6 +107,7 @@ func (c *Config) UpsertTarget(name string, t Target) error {
 	if err := ValidateTarget(name, t); err != nil {
 		return err
 	}
+	t.Groups = uniqueSorted(t.Groups)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.Targets == nil {
@@ -93,6 +125,61 @@ func (c *Config) SetHostNote(name, note string) (Target, error) {
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
 	t.Note = note
+	c.Targets[name] = t
+	if err := saveHostDBLocked(c); err != nil {
+		return Target{}, err
+	}
+	return t, nil
+}
+
+func (c *Config) RemoveTarget(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.Targets[name]; !ok {
+		return fmt.Errorf("unknown host %q", name)
+	}
+	delete(c.Targets, name)
+	return saveHostDBLocked(c)
+}
+
+func (c *Config) AddHostGroup(name, group string) (Target, error) {
+	if !ValidName(group) {
+		return Target{}, fmt.Errorf("bad group name %q", group)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.Targets[name]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown host %q", name)
+	}
+	if !hasGroup(t.Groups, group) {
+		t.Groups = append(append([]string(nil), t.Groups...), group)
+		sort.Strings(t.Groups)
+	}
+	c.Targets[name] = t
+	if err := saveHostDBLocked(c); err != nil {
+		return Target{}, err
+	}
+	return t, nil
+}
+
+func (c *Config) RemoveHostGroup(name, group string) (Target, error) {
+	if !ValidName(group) {
+		return Target{}, fmt.Errorf("bad group name %q", group)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.Targets[name]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown host %q", name)
+	}
+	groups := make([]string, 0, len(t.Groups))
+	for _, g := range t.Groups {
+		if g != group {
+			groups = append(groups, g)
+		}
+	}
+	t.Groups = groups
 	c.Targets[name] = t
 	if err := saveHostDBLocked(c); err != nil {
 		return Target{}, err
@@ -215,6 +302,8 @@ func LoadHostDB(c *Config) error {
 		if err := ValidateTarget(name, target); err != nil {
 			return err
 		}
+		target.Groups = uniqueSorted(target.Groups)
+		db.Hosts[name] = target
 	}
 	c.Targets = db.Hosts
 	return nil
@@ -315,5 +404,40 @@ func ValidateTarget(name string, target Target) error {
 	if target.Port < 0 || target.Port > 65535 {
 		return fmt.Errorf("target %q port is invalid", name)
 	}
+	for _, group := range target.Groups {
+		if !targetNameRe.MatchString(group) {
+			return fmt.Errorf("target %q has bad group %q", name, group)
+		}
+	}
 	return nil
+}
+
+func hasGroup(groups []string, group string) bool {
+	for _, g := range groups {
+		if g == group {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueSorted(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cloneTarget(t Target) Target {
+	t.Groups = append([]string(nil), t.Groups...)
+	return t
 }
