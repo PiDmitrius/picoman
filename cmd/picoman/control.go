@@ -675,6 +675,10 @@ func runGroups(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: picoman groups @<group> [add|rm <host>]")
 		os.Exit(1)
 	}
+	if group == builtinAllGroup {
+		fmt.Fprintln(os.Stderr, "cannot modify built-in group @all")
+		os.Exit(1)
+	}
 	switch args[1] {
 	case "add":
 		simpleControl("GROUP_ADD", group, args[2])
@@ -689,19 +693,19 @@ func runGroups(args []string) {
 func runGroupList() {
 	cfg := loadHosts()
 	names := cfg.GroupNames()
-	if len(names) == 0 {
-		fmt.Println("groups list empty")
-		return
-	}
 	fmt.Println("groups list")
+	fmt.Println("- @all")
 	for _, name := range names {
+		if name == builtinAllGroup {
+			continue
+		}
 		fmt.Println("- @" + name)
 	}
 }
 
 func runGroupShow(group string) {
 	cfg := loadHosts()
-	names := cfg.HostsInGroup(group)
+	names := groupHosts(cfg, group)
 	if len(names) == 0 {
 		fmt.Println("groups @" + group + " empty")
 		return

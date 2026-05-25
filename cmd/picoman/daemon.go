@@ -352,6 +352,8 @@ type cmdEntry struct {
 	async bool
 }
 
+const builtinAllGroup = "all"
+
 var commands = map[string]cmdEntry{
 	"start":  {fn: cmdHelp},
 	"help":   {fn: cmdHelp},
@@ -484,6 +486,9 @@ func cmdGroups(c cmdCtx, fields []string) (cmdReply, error) {
 	}
 	if len(fields) != 4 {
 		return cmdReply{}, errors.New("usage: groups @<group> [add|rm <host>]")
+	}
+	if group == builtinAllGroup {
+		return cmdReply{}, errors.New("cannot modify built-in group @all")
 	}
 	host := fields[3]
 	switch fields[2] {
@@ -796,18 +801,18 @@ func hostText(name string, target config.Target) string {
 
 func groupsText(cfg *config.Config) string {
 	names := cfg.GroupNames()
-	if len(names) == 0 {
-		return "groups list empty"
-	}
-	lines := []string{"groups list"}
+	lines := []string{"groups list", "- @all"}
 	for _, name := range names {
+		if name == builtinAllGroup {
+			continue
+		}
 		lines = append(lines, "- @"+html.EscapeString(name))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func groupText(cfg *config.Config, group string) string {
-	names := cfg.HostsInGroup(group)
+	names := groupHosts(cfg, group)
 	if len(names) == 0 {
 		return "groups @" + html.EscapeString(group) + " empty"
 	}
@@ -816,6 +821,21 @@ func groupText(cfg *config.Config, group string) string {
 		lines = append(lines, "- "+hostNameText(name))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func groupHosts(cfg *config.Config, group string) []string {
+	if group != builtinAllGroup {
+		return cfg.HostsInGroup(group)
+	}
+	targets := cfg.AllTargets()
+	names := make([]string, 0, len(targets))
+	for name, target := range targets {
+		if !target.Disabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func hostBootstrapLine(cfg *config.Config, name string) (string, error) {
@@ -1034,7 +1054,7 @@ func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State,
 	if err != nil {
 		return "", 0, err
 	}
-	hosts := cfg.HostsInGroup(group)
+	hosts := groupHosts(cfg, group)
 	if len(hosts) == 0 {
 		return "", 0, fmt.Errorf("group %q is empty", selector)
 	}

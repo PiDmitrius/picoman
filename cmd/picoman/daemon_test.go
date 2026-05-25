@@ -80,3 +80,16 @@ func TestHostGroupsAreListedSorted(t *testing.T) {
 		t.Fatalf("HostsInGroup = %#v, want %#v", got, want)
 	}
 }
+
+func TestBuiltinAllGroupListsEnabledHosts(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one":   {User: "u", Host: "one.example"},
+			"two":   {User: "u", Host: "two.example"},
+			"three": {User: "u", Host: "three.example", Disabled: true},
+		},
+	}
+	if got, want := groupHosts(cfg, "all"), []string{"one", "two"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("groupHosts(all) = %#v, want %#v", got, want)
+	}
+}
