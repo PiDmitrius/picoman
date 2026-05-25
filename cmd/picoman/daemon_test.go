@@ -118,7 +118,7 @@ func TestPluralListCommandsRejectObjectActions(t *testing.T) {
 	}
 }
 
-func TestCmdHostObjectRemove(t *testing.T) {
+func TestCmdHostRemoveCommand(t *testing.T) {
 	t.Setenv("PICOMAN_DATA_DIR", t.TempDir())
 	cfg := &config.Config{
 		HostDB:  t.TempDir() + "/hosts.json",
@@ -127,7 +127,7 @@ func TestCmdHostObjectRemove(t *testing.T) {
 	if err := cfg.UpsertTarget("host", config.Target{User: "user", Host: "host.example"}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "remove"})
+	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "remove", "host"})
 	if err != nil {
 		t.Fatalf("cmdHost returned error: %v", err)
 	}
@@ -139,13 +139,46 @@ func TestCmdHostObjectRemove(t *testing.T) {
 	}
 }
 
-func TestCmdHostRejectsUnknownObjectAction(t *testing.T) {
+func TestCmdHostRejectsObjectAction(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example"},
 		},
 	}
-	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "unknown"}); err == nil {
-		t.Fatal("cmdHost accepted unknown object action")
+	if _, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "host", "remove"}); err == nil {
+		t.Fatal("cmdHost accepted object action")
+	}
+}
+
+func TestCmdGroupCommands(t *testing.T) {
+	cfg := &config.Config{
+		HostDB: t.TempDir() + "/hosts.json",
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "add", "@web", "host"}); err != nil {
+		t.Fatalf("cmdGroup add returned error: %v", err)
+	}
+	if got, want := cfg.HostsInGroup("web"), []string{"host"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("HostsInGroup(web) = %#v, want %#v", got, want)
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "remove", "@web", "host"}); err != nil {
+		t.Fatalf("cmdGroup remove returned error: %v", err)
+	}
+	if got := cfg.HostsInGroup("web"); len(got) != 0 {
+		t.Fatalf("HostsInGroup(web) = %#v, want empty", got)
+	}
+}
+
+func TestCmdGroupRejectsObjectAction(t *testing.T) {
+	cfg := &config.Config{
+		HostDB: t.TempDir() + "/hosts.json",
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "@web", "add", "host"}); err == nil {
+		t.Fatal("cmdGroup accepted object action")
 	}
 }

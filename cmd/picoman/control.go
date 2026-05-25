@@ -581,11 +581,7 @@ func runHost(args []string) {
 			runHostShow(args[0])
 			return
 		}
-		if len(args) == 2 && (args[1] == "rm" || args[1] == "remove") {
-			runHostRemove(args[:1])
-			return
-		}
-		fmt.Fprintln(os.Stderr, "usage: picoman host <name> [rm]")
+		fmt.Fprintln(os.Stderr, "usage: picoman host <name>")
 		os.Exit(1)
 	}
 }
@@ -693,7 +689,7 @@ func runHostNote(args []string) {
 
 func runHostRemove(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: picoman host rm <name>")
+		fmt.Fprintln(os.Stderr, "usage: picoman host remove <name>")
 		os.Exit(1)
 	}
 	simpleControl("HOST_RM", args[0])
@@ -702,6 +698,14 @@ func runHostRemove(args []string) {
 func runGroup(args []string) {
 	if len(args) == 0 || args[0] == "list" {
 		runGroupList()
+		return
+	}
+	switch args[0] {
+	case "add":
+		runGroupModify("add", args[1:])
+		return
+	case "rm", "remove":
+		runGroupModify("remove", args[1:])
 		return
 	}
 	group, err := parseGroupSelector(args[0])
@@ -713,21 +717,32 @@ func runGroup(args []string) {
 		runGroupShow(group)
 		return
 	}
-	if len(args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: picoman group @<group> [add|rm <host>]")
+	fmt.Fprintln(os.Stderr, "usage: picoman group @<group> | group add @<group> <host> | group remove @<group> <host>")
+	os.Exit(1)
+}
+
+func runGroupModify(action string, args []string) {
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: picoman group "+action+" @<group> <host>")
+		os.Exit(1)
+	}
+	group, err := parseGroupSelector(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	if group == builtinAllGroup {
 		fmt.Fprintln(os.Stderr, "cannot modify built-in group @all")
 		os.Exit(1)
 	}
-	switch args[1] {
+	host := args[1]
+	switch action {
 	case "add":
-		simpleControl("GROUP_ADD", group, args[2])
-	case "rm", "remove":
-		simpleControl("GROUP_RM", group, args[2])
+		simpleControl("GROUP_ADD", group, host)
+	case "remove":
+		simpleControl("GROUP_RM", group, host)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: picoman group @<group> [add|rm <host>]")
+		fmt.Fprintln(os.Stderr, "usage: picoman group add @<group> <host> | group remove @<group> <host>")
 		os.Exit(1)
 	}
 }

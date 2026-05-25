@@ -460,7 +460,7 @@ func cmdHosts(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: host <name> [rm] | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host rm <name>")
+		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host remove <name>")
 	}
 	switch fields[1] {
 	case "list":
@@ -481,15 +481,8 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{text: text, html: true}, nil
 	default:
 		name := fields[1]
-		if len(fields) == 3 && (fields[2] == "rm" || fields[2] == "remove") {
-			text, err := removeHost([]string{name}, c.cfg)
-			if err != nil {
-				return cmdReply{html: true}, err
-			}
-			return cmdReply{text: text, html: true}, nil
-		}
 		if len(fields) != 2 {
-			return cmdReply{}, errors.New("usage: host <name> [rm]")
+			return cmdReply{}, errors.New("usage: host <name>")
 		}
 		target, ok := c.cfg.Target(name)
 		if !ok {
@@ -508,7 +501,13 @@ func cmdGroupList(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
+		return cmdReply{}, errors.New("usage: group @<group> | group add @<group> <host> | group remove @<group> <host>")
+	}
+	switch fields[1] {
+	case "add":
+		return cmdGroupModify(c, "add", fields[2:])
+	case "rm", "remove":
+		return cmdGroupModify(c, "remove", fields[2:])
 	}
 	group, err := parseGroupSelector(fields[1])
 	if err != nil {
@@ -517,26 +516,34 @@ func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) == 2 {
 		return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
 	}
-	if len(fields) != 4 {
-		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
+	return cmdReply{}, errors.New("usage: group @<group> | group add @<group> <host> | group remove @<group> <host>")
+}
+
+func cmdGroupModify(c cmdCtx, action string, fields []string) (cmdReply, error) {
+	if len(fields) != 2 {
+		return cmdReply{}, errors.New("usage: group " + action + " @<group> <host>")
+	}
+	group, err := parseGroupSelector(fields[0])
+	if err != nil {
+		return cmdReply{}, err
 	}
 	if group == builtinAllGroup {
 		return cmdReply{}, errors.New("cannot modify built-in group @all")
 	}
-	host := fields[3]
-	switch fields[2] {
+	host := fields[1]
+	switch action {
 	case "add":
 		if _, err := c.cfg.AddHostGroup(host, group); err != nil {
 			return cmdReply{}, err
 		}
 		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nadded " + hostNameText(host)), html: true}, nil
-	case "rm", "remove":
+	case "remove":
 		if _, err := c.cfg.RemoveHostGroup(host, group); err != nil {
 			return cmdReply{}, err
 		}
 		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nremoved " + hostNameText(host)), html: true}, nil
 	default:
-		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
+		return cmdReply{}, errors.New("usage: group add @<group> <host> | group remove @<group> <host>")
 	}
 }
 
@@ -718,12 +725,11 @@ commands:
 /host <name>
 /host note <name> [note]
 /host add
-/host <name> rm
-/host rm <name>
+/host remove <name>
 /groups
 /group @<group>
-/group @<group> add <host>
-/group @<group> rm <host>
+/group add @<group> <host>
+/group remove @<group> <host>
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
@@ -972,7 +978,7 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 
 func removeHost(fields []string, cfg *config.Config) (string, error) {
 	if len(fields) != 1 {
-		return "", errors.New("usage: host rm <name>")
+		return "", errors.New("usage: host remove <name>")
 	}
 	name := fields[0]
 	if err := cfg.RemoveTarget(name); err != nil {
