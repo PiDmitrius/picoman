@@ -132,6 +132,16 @@ func (c *Config) SetHostNote(name, note string) (Target, error) {
 	return t, nil
 }
 
+func (c *Config) RemoveTarget(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.Targets[name]; !ok {
+		return fmt.Errorf("unknown host %q", name)
+	}
+	delete(c.Targets, name)
+	return saveHostDBLocked(c)
+}
+
 func (c *Config) AddHostGroup(name, group string) (Target, error) {
 	if !ValidName(group) {
 		return Target{}, fmt.Errorf("bad group name %q", group)

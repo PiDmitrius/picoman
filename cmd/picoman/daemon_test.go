@@ -107,3 +107,13 @@ func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
 		t.Fatalf("LogLevel = %q, want all", got)
 	}
 }
+
+func TestPluralListCommandsRejectObjectActions(t *testing.T) {
+	cfg := &config.Config{Targets: map[string]config.Target{}}
+	if _, err := cmdHosts(cmdCtx{cfg: cfg}, []string{"hosts", "rm", "host"}); err == nil {
+		t.Fatal("cmdHosts accepted object action")
+	}
+	if _, err := cmdGroupList(cmdCtx{cfg: cfg}, []string{"groups", "@all"}); err == nil {
+		t.Fatal("cmdGroupList accepted object selector")
+	}
+}

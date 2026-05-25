@@ -47,3 +47,22 @@ func TestAllTargetsSnapshotDoesNotShareGroupsBackingArray(t *testing.T) {
 		t.Fatalf("snapshot groups = %#v, want %#v", got, want)
 	}
 }
+
+func TestRemoveTargetDeletesHost(t *testing.T) {
+	cfg := &Config{
+		HostDB:  t.TempDir() + "/hosts.json",
+		Targets: map[string]Target{},
+	}
+	if err := cfg.UpsertTarget("host", Target{User: "u", Host: "host.example"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.RemoveTarget("host"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Target("host"); ok {
+		t.Fatal("target still exists after RemoveTarget")
+	}
+	if err := cfg.RemoveTarget("host"); err == nil {
+		t.Fatal("RemoveTarget accepted unknown host")
+	}
+}

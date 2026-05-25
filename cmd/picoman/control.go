@@ -56,6 +56,7 @@ func (s *controlServer) handlers() map[string]controlHandler {
 		"PUT":       s.put,
 		"HOST_ADD":  bind(s.hostAdd),
 		"HOST_NOTE": bind(s.hostNote),
+		"HOST_RM":   bind(s.hostRemove),
 		"GROUP_ADD": bind(s.groupAdd),
 		"GROUP_RM":  bind(s.groupRemove),
 	}
@@ -382,6 +383,19 @@ func (s *controlServer) hostNote(args [][]byte) ([][]byte, error) {
 	return nil, nil
 }
 
+func (s *controlServer) hostRemove(args [][]byte) ([][]byte, error) {
+	if len(args) != 1 {
+		return nil, errors.New("usage: HOST_RM <name>")
+	}
+	if err := s.cfg.RemoveTarget(string(args[0])); err != nil {
+		return nil, err
+	}
+	if err := writeKnownHosts(s.cfg); err != nil {
+		return nil, fmt.Errorf("write known_hosts: %w", err)
+	}
+	return nil, nil
+}
+
 func (s *controlServer) groupAdd(args [][]byte) ([][]byte, error) {
 	if len(args) != 2 {
 		return nil, errors.New("usage: GROUP_ADD <group> <host>")
@@ -560,9 +574,20 @@ func runHost(args []string) {
 		runHostAdd(args[1:])
 	case "note":
 		runHostNote(args[1:])
+	case "rm", "remove":
+		runHostRemove(args[1:])
 	default:
 		runHostShow(args[0])
 	}
+}
+
+func runHosts(args []string) {
+	if len(args) == 0 || args[0] == "list" {
+		runHostList()
+		return
+	}
+	fmt.Fprintln(os.Stderr, "usage: picoman hosts")
+	os.Exit(1)
 }
 
 // loadHosts returns config with hosts.json loaded. Reads disk directly — the
@@ -657,7 +682,15 @@ func runHostNote(args []string) {
 	simpleControl("HOST_NOTE", args[0], strings.Join(args[1:], " "))
 }
 
-func runGroups(args []string) {
+func runHostRemove(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: picoman host rm <name>")
+		os.Exit(1)
+	}
+	simpleControl("HOST_RM", args[0])
+}
+
+func runGroup(args []string) {
 	if len(args) == 0 || args[0] == "list" {
 		runGroupList()
 		return
@@ -672,7 +705,7 @@ func runGroups(args []string) {
 		return
 	}
 	if len(args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: picoman groups @<group> [add|rm <host>]")
+		fmt.Fprintln(os.Stderr, "usage: picoman group @<group> [add|rm <host>]")
 		os.Exit(1)
 	}
 	if group == builtinAllGroup {
@@ -685,9 +718,18 @@ func runGroups(args []string) {
 	case "rm", "remove":
 		simpleControl("GROUP_RM", group, args[2])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: picoman groups @<group> [add|rm <host>]")
+		fmt.Fprintln(os.Stderr, "usage: picoman group @<group> [add|rm <host>]")
 		os.Exit(1)
 	}
+}
+
+func runGroups(args []string) {
+	if len(args) == 0 || args[0] == "list" {
+		runGroupList()
+		return
+	}
+	fmt.Fprintln(os.Stderr, "usage: picoman groups")
+	os.Exit(1)
 }
 
 func runGroupList() {
@@ -707,10 +749,10 @@ func runGroupShow(group string) {
 	cfg := loadHosts()
 	names := groupHosts(cfg, group)
 	if len(names) == 0 {
-		fmt.Println("groups @" + group + " empty")
+		fmt.Println("group @" + group + " empty")
 		return
 	}
-	fmt.Println("groups @" + group)
+	fmt.Println("group @" + group)
 	for _, name := range names {
 		fmt.Println("- " + name)
 	}

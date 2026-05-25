@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.92"
+const version = "v0.1.94"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -58,6 +58,10 @@ func main() {
 		runLogLevel(os.Args[2:])
 	case "host":
 		runHost(os.Args[2:])
+	case "hosts":
+		runHosts(os.Args[2:])
+	case "group":
+		runGroup(os.Args[2:])
 	case "groups":
 		runGroups(os.Args[2:])
 	case "askpass":
@@ -105,10 +109,11 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  host add <name> <user@host:port> <keytype> <key>")
 	fmt.Fprintln(os.Stderr, "                                     Register target with pinned host key")
 	fmt.Fprintln(os.Stderr, "  host note <name> [<note>]          Set or clear free-form note")
+	fmt.Fprintln(os.Stderr, "  host rm <name>                     Remove target")
 	fmt.Fprintln(os.Stderr, "  groups                             List groups")
-	fmt.Fprintln(os.Stderr, "  groups @<group>                    Show group hosts")
-	fmt.Fprintln(os.Stderr, "  groups @<group> add <host>         Add host to group")
-	fmt.Fprintln(os.Stderr, "  groups @<group> rm <host>          Remove host from group")
+	fmt.Fprintln(os.Stderr, "  group @<group>                     Show group hosts")
+	fmt.Fprintln(os.Stderr, "  group @<group> add <host>          Add host to group")
+	fmt.Fprintln(os.Stderr, "  group @<group> rm <host>           Remove host from group")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Maintenance:")
 	fmt.Fprintln(os.Stderr, "  loglevel <chat|all>                Set audit verbosity")

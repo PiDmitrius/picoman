@@ -359,9 +359,10 @@ var commands = map[string]cmdEntry{
 	"start":    {fn: cmdHelp},
 	"help":     {fn: cmdHelp},
 	"status":   {fn: cmdStatus},
-	"hosts":    {fn: cmdHostList},
+	"hosts":    {fn: cmdHosts},
 	"host":     {fn: cmdHost},
-	"groups":   {fn: cmdGroups},
+	"groups":   {fn: cmdGroupList},
+	"group":    {fn: cmdGroup},
 	"unseal":   {fn: cmdUnseal, async: true},
 	"unlock":   {fn: cmdUnlock},
 	"seal":     {fn: cmdSeal},
@@ -450,9 +451,16 @@ func cmdHostList(c cmdCtx, _ []string) (cmdReply, error) {
 	return cmdReply{text: infoText(hostsText(c.cfg)), html: true}, nil
 }
 
+func cmdHosts(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) == 1 || fields[1] == "list" {
+		return cmdHostList(c, fields)
+	}
+	return cmdReply{}, errors.New("usage: hosts")
+}
+
 func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) < 2 {
-		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]]")
+		return cmdReply{}, errors.New("usage: host <name> | host list | host note <name> [note] | host add [<name> [<user>@<host>:<port> <keytype> <key>]] | host rm <name>")
 	}
 	switch fields[1] {
 	case "list":
@@ -465,6 +473,12 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{text: text, html: true}, nil
 	case "add":
 		return hostAdd(c.cfg, fields[2:])
+	case "rm", "remove":
+		text, err := removeHost(fields[2:], c.cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
+		}
+		return cmdReply{text: text, html: true}, nil
 	default:
 		name := fields[1]
 		target, ok := c.cfg.Target(name)
@@ -475,9 +489,16 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 	}
 }
 
-func cmdGroups(c cmdCtx, fields []string) (cmdReply, error) {
+func cmdGroupList(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) == 1 || fields[1] == "list" {
 		return cmdReply{text: infoText(groupsText(c.cfg)), html: true}, nil
+	}
+	return cmdReply{}, errors.New("usage: groups")
+}
+
+func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
+	if len(fields) < 2 {
+		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
 	}
 	group, err := parseGroupSelector(fields[1])
 	if err != nil {
@@ -487,7 +508,7 @@ func cmdGroups(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
 	}
 	if len(fields) != 4 {
-		return cmdReply{}, errors.New("usage: groups @<group> [add|rm <host>]")
+		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
 	}
 	if group == builtinAllGroup {
 		return cmdReply{}, errors.New("cannot modify built-in group @all")
@@ -498,14 +519,14 @@ func cmdGroups(c cmdCtx, fields []string) (cmdReply, error) {
 		if _, err := c.cfg.AddHostGroup(host, group); err != nil {
 			return cmdReply{}, err
 		}
-		return cmdReply{text: successText("groups @" + html.EscapeString(group) + "\nadded " + hostNameText(host)), html: true}, nil
+		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nadded " + hostNameText(host)), html: true}, nil
 	case "rm", "remove":
 		if _, err := c.cfg.RemoveHostGroup(host, group); err != nil {
 			return cmdReply{}, err
 		}
-		return cmdReply{text: successText("groups @" + html.EscapeString(group) + "\nremoved " + hostNameText(host)), html: true}, nil
+		return cmdReply{text: successText("group @" + html.EscapeString(group) + "\nremoved " + hostNameText(host)), html: true}, nil
 	default:
-		return cmdReply{}, errors.New("usage: groups @<group> [add|rm <host>]")
+		return cmdReply{}, errors.New("usage: group @<group> [add|rm <host>]")
 	}
 }
 
@@ -687,10 +708,11 @@ commands:
 /host <name>
 /host note <name> [note]
 /host add
+/host rm <name>
 /groups
-/groups @<group>
-/groups @<group> add <host>
-/groups @<group> rm <host>
+/group @<group>
+/group @<group> add <host>
+/group @<group> rm <host>
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
@@ -828,9 +850,9 @@ func groupsText(cfg *config.Config) string {
 func groupText(cfg *config.Config, group string) string {
 	names := groupHosts(cfg, group)
 	if len(names) == 0 {
-		return "groups @" + html.EscapeString(group) + " empty"
+		return "group @" + html.EscapeString(group) + " empty"
 	}
-	lines := []string{"groups @" + html.EscapeString(group)}
+	lines := []string{"group @" + html.EscapeString(group)}
 	for _, name := range names {
 		lines = append(lines, "- "+hostNameText(name))
 	}
@@ -935,6 +957,20 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 		return successText("host note cleared\n" + hostNameText(name)), nil
 	}
 	return successText("host note\n" + hostNameText(name) + "\n" + html.EscapeString(target.Note)), nil
+}
+
+func removeHost(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) != 1 {
+		return "", errors.New("usage: host rm <name>")
+	}
+	name := fields[0]
+	if err := cfg.RemoveTarget(name); err != nil {
+		return "", err
+	}
+	if err := writeKnownHosts(cfg); err != nil {
+		return "", fmt.Errorf("write known_hosts: %w", err)
+	}
+	return successText("host removed\n" + hostNameText(name)), nil
 }
 
 func hostNameText(name string) string {
