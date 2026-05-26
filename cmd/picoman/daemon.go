@@ -667,22 +667,25 @@ func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
 	// the remote command's own exit code — propagate transparently.
 	if err != nil {
 		return cmdReply{
-			text: runErrorText(target, command, output, err.Error()),
+			text: runAuditText(c.audit, target, command, output, err.Error()),
 			html: true,
 		}, err
 	}
 	if exitCode == 255 {
 		return cmdReply{
-			text: runErrorText(target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
+			text: runAuditText(c.audit, target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
 			html: true,
 		}, errors.New("ssh: exit status 255")
 	}
-	return cmdReply{text: runText(target, command, output), html: true}, nil
+	return cmdReply{text: runAuditText(c.audit, target, command, output, ""), html: true}, nil
 }
 
 func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 	text, err := handleGet(c.ctx, c.cfg, c.st, fields)
 	if err == nil {
+		if len(fields) >= 2 && !auditFull(c.audit) {
+			return cmdReply{text: actionText("⬅️ get", fields[1]), html: true}, nil
+		}
 		return cmdReply{text: text, html: true}, nil
 	}
 	if len(fields) < 3 {
@@ -693,7 +696,7 @@ func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 		localName = fields[3]
 	}
 	return cmdReply{
-		text: transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error()),
+		text: transferAuditText(c.audit, "⬅️ get", fields[1], fields[2], localName, err.Error()),
 		html: true,
 	}, err
 }
@@ -701,6 +704,9 @@ func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 	text, err := handlePut(c.ctx, c.cfg, c.st, fields)
 	if err == nil {
+		if len(fields) >= 2 && !auditFull(c.audit) {
+			return cmdReply{text: actionText("➡️ put", fields[1]), html: true}, nil
+		}
 		return cmdReply{text: text, html: true}, nil
 	}
 	if len(fields) < 3 {
@@ -711,7 +717,7 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 		remoteName = fields[3]
 	}
 	return cmdReply{
-		text: transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error()),
+		text: transferAuditText(c.audit, "➡️ put", fields[1], fields[2], remoteName, err.Error()),
 		html: true,
 	}, err
 }
@@ -1479,6 +1485,16 @@ func runErrorText(target, command, output, reason string) string {
 	return text + outputBlock(output)
 }
 
+func runAuditText(a *auditState, target, command, output, reason string) string {
+	if !auditFull(a) {
+		return actionText("▶️ run", target)
+	}
+	if reason != "" {
+		return runErrorText(target, command, output, reason)
+	}
+	return runText(target, command, output)
+}
+
 func outputBlock(output string) string {
 	if output == "" {
 		return "\n(no output)"
@@ -1510,4 +1526,18 @@ func transferErrorText(op, target, source, destination, reason string) string {
 		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
 	}
 	return text
+}
+
+func transferAuditText(a *auditState, op, target, source, destination, reason string) string {
+	if !auditFull(a) {
+		return actionText(op, target)
+	}
+	if reason != "" {
+		return transferErrorText(op, target, source, destination, reason)
+	}
+	return transferText(op, target, source, destination)
+}
+
+func auditFull(a *auditState) bool {
+	return a != nil && a.LogLevel() == "all"
 }

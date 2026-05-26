@@ -2,9 +2,11 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"picoman/internal/agent"
 	"picoman/internal/config"
 )
 
@@ -106,6 +108,72 @@ func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
 	}
 	if got := audit.LogLevel(); got != "all" {
 		t.Fatalf("LogLevel = %q, want all", got)
+	}
+}
+
+func TestChatLogLevelKeepsRunErrorMinimal(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"run", "host", "secret", "command"})
+	if err == nil {
+		t.Fatal("cmdRun succeeded with locked key")
+	}
+	if got, want := reply.text, actionText("▶️ run", "host"); got != want {
+		t.Fatalf("reply = %q, want %q", got, want)
+	}
+	if containsAny(reply.text, "secret", "command", "key is locked") {
+		t.Fatalf("chat reply leaked details: %q", reply.text)
+	}
+}
+
+func TestAllLogLevelKeepsRunErrorDetails(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"run", "host", "secret", "command"})
+	if err == nil {
+		t.Fatal("cmdRun succeeded with locked key")
+	}
+	if !containsAny(reply.text, "secret command", "key is locked") {
+		t.Fatalf("all reply did not include details: %q", reply.text)
+	}
+}
+
+func TestChatLogLevelKeepsTransferErrorsMinimal(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example"},
+		},
+	}
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	for _, tt := range []struct {
+		name   string
+		fn     func(cmdCtx, []string) (cmdReply, error)
+		fields []string
+		want   string
+	}{
+		{name: "get", fn: cmdGet, fields: []string{"get", "host", "secret-remote", "secret-local"}, want: actionText("⬅️ get", "host")},
+		{name: "put", fn: cmdPut, fields: []string{"put", "host", "secret-local", "secret-remote"}, want: actionText("➡️ put", "host")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reply, err := tt.fn(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, tt.fields)
+			if err == nil {
+				t.Fatal("command succeeded with locked key")
+			}
+			if reply.text != tt.want {
+				t.Fatalf("reply = %q, want %q", reply.text, tt.want)
+			}
+			if containsAny(reply.text, "secret-local", "secret-remote", "key is locked") {
+				t.Fatalf("chat reply leaked details: %q", reply.text)
+			}
+		})
 	}
 }
 
@@ -256,4 +324,13 @@ func TestCmdGroupRejectsObjectAction(t *testing.T) {
 	if _, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "show", "@web"}); err == nil {
 		t.Fatal("cmdGroup accepted old show command")
 	}
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }

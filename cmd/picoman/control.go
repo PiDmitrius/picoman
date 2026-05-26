@@ -325,14 +325,14 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 	output, exitCode, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
+		notify(s.out, s.cfg, s.bot, true, runAuditText(s.audit, host, command, output, err.Error()))
 		return nil, err
 	}
 	switch {
 	case exitCode == 255:
 		// ssh-level failure (connect/auth/protocol). Distinct from any
 		// remote exit 1..254 which we propagate transparently.
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
+		notify(s.out, s.cfg, s.bot, true, runAuditText(s.audit, host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
 	case s.audit.LogLevel() == "all":
 		notify(s.out, s.cfg, s.bot, true, runText(host, command, output))
 	default:
@@ -350,10 +350,10 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 	}
 	host, remote, local := string(args[0]), string(args[1]), string(args[2])
 	if err := copyFromTarget(ctx, s.cfg, s.st, host, remote, local); err != nil {
-		notify(s.out, s.cfg, s.bot, true, transferErrorText("⬅️ get", host, remote, local, err.Error()))
+		notify(s.out, s.cfg, s.bot, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, true, transferText("⬅️ get", host, remote, local))
+	notify(s.out, s.cfg, s.bot, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, ""))
 	return nil, nil
 }
 
@@ -422,10 +422,10 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 	}
 	host, local, remote := string(args[0]), string(args[1]), string(args[2])
 	if err := copyToTarget(ctx, s.cfg, s.st, host, local, remote); err != nil {
-		notify(s.out, s.cfg, s.bot, true, transferErrorText("➡️ put", host, local, remote, err.Error()))
+		notify(s.out, s.cfg, s.bot, true, transferAuditText(s.audit, "➡️ put", host, local, remote, err.Error()))
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, true, transferText("➡️ put", host, local, remote))
+	notify(s.out, s.cfg, s.bot, true, transferAuditText(s.audit, "➡️ put", host, local, remote, ""))
 	return nil, nil
 }
 
