@@ -171,6 +171,84 @@ func notify(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, te
 	}
 }
 
+type actionMessage struct {
+	chatID    int64
+	messageID int64
+}
+
+func sendActionStart(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
+	sent := make([]actionMessage, 0, len(cfg.AllowedUsers))
+	for _, userID := range cfg.AllowedUsers {
+		msg, err := sendDirectMessage(bot, userID, 0, html, text)
+		if err != nil {
+			log.Printf("send action start user=%d: %v", userID, err)
+			enqueueNotify(out, bot, userID, html, text)
+			continue
+		}
+		sent = append(sent, actionMessage{chatID: userID, messageID: msg.MessageID})
+	}
+	return sent
+}
+
+func sendActionReplyStart(out *outbox.Store, bot *tg.Client, msg tg.Message, html bool, text string) []actionMessage {
+	sent, err := sendDirectMessage(bot, msg.Chat.ID, msg.MessageID, html, text)
+	if err != nil {
+		log.Printf("send action reply start chat=%d: %v", msg.Chat.ID, err)
+		enqueueReply(out, bot, msg, cmdReply{text: text, html: html})
+		return nil
+	}
+	return []actionMessage{{chatID: msg.Chat.ID, messageID: sent.MessageID}}
+}
+
+func editActionMessages(out *outbox.Store, bot *tg.Client, messages []actionMessage, html bool, text string) {
+	if len(messages) == 0 {
+		return
+	}
+	for _, msg := range messages {
+		if err := editDirectMessage(bot, msg.chatID, msg.messageID, html, text); err != nil {
+			log.Printf("edit action message chat=%d message=%d: %v", msg.chatID, msg.messageID, err)
+			enqueueNotify(out, bot, msg.chatID, html, text)
+		}
+	}
+}
+
+func sendDirectMessage(bot *tg.Client, chatID, replyToID int64, html bool, text string) (tg.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	switch {
+	case html && replyToID > 0:
+		return bot.SendHTMLReplyResult(ctx, chatID, replyToID, text)
+	case html:
+		return bot.SendHTMLResult(ctx, chatID, text)
+	case replyToID > 0:
+		return bot.SendReplyResult(ctx, chatID, replyToID, text)
+	default:
+		return bot.SendMessageResult(ctx, chatID, text)
+	}
+}
+
+func editDirectMessage(bot *tg.Client, chatID, messageID int64, html bool, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if html {
+		return bot.EditHTMLMessage(ctx, chatID, messageID, text)
+	}
+	return bot.EditMessage(ctx, chatID, messageID, text)
+}
+
+func enqueueNotify(out *outbox.Store, bot *tg.Client, userID int64, html bool, text string) {
+	var err error
+	if html {
+		err = out.EnqueueHTML(userID, text)
+	} else {
+		err = out.Enqueue(userID, text)
+	}
+	if err != nil {
+		log.Printf("enqueue notify user=%d: %v", userID, err)
+		go criticalNotifyUser(userID, bot, "outbox", err)
+	}
+}
+
 func criticalNotifyUsers(cfg *config.Config, bot *tg.Client, name string, err error) {
 	for _, userID := range cfg.AllowedUsers {
 		criticalNotifyUser(userID, bot, name, err)
@@ -429,10 +507,48 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		enqueueReply(out, bot, msg, reply)
 	}
 	if entry.async {
+		if start := commandStartText(name, fields); start != "" {
+			started := sendActionReplyStart(out, bot, msg, true, start)
+			go func() {
+				reply, err := entry.fn(c, fields)
+				logCommand(msg, err)
+				if reply.text == "" && err != nil {
+					reply.text = errorText(err.Error())
+				}
+				if len(started) > 0 {
+					editActionMessages(out, bot, started, reply.html, reply.text)
+					return
+				}
+				enqueueReply(out, bot, msg, reply)
+			}()
+			return
+		}
 		go run()
 		return
 	}
 	run()
+}
+
+func commandStartText(name string, fields []string) string {
+	switch name {
+	case "run":
+		if len(fields) < 3 {
+			return ""
+		}
+		return actionStartText("▶️ run", fields[1])
+	case "get":
+		if len(fields) < 3 {
+			return ""
+		}
+		return actionStartText("⬅️ get", fields[1])
+	case "put":
+		if len(fields) < 3 {
+			return ""
+		}
+		return actionStartText("➡️ put", fields[1])
+	default:
+		return ""
+	}
 }
 
 func logCommand(msg tg.Message, err error) {
@@ -1504,6 +1620,10 @@ func outputBlock(output string) string {
 
 func actionText(action, target string) string {
 	return html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
+}
+
+func actionStartText(action, target string) string {
+	return "⏳ " + actionText(action, target)
 }
 
 func actionErrorText(action, target, reason string) string {
