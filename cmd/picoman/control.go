@@ -322,7 +322,7 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
-	started := sendActionStart(s.out, s.cfg, s.bot, true, actionStartText("▶️ run", host))
+	started := sendActionStart(s.out, s.cfg, s.bot, true, runStartAuditText(s.audit, host, command))
 	output, exitCode, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
@@ -350,7 +350,7 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: GET <host> <remote> <local>")
 	}
 	host, remote, local := string(args[0]), string(args[1]), string(args[2])
-	started := sendActionStart(s.out, s.cfg, s.bot, true, actionStartText("⬅️ get", host))
+	started := sendActionStart(s.out, s.cfg, s.bot, true, transferStartAuditText(s.audit, "⬅️ get", host, remote, local))
 	if err := copyFromTarget(ctx, s.cfg, s.st, host, remote, local); err != nil {
 		s.finishAction(started, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
@@ -423,7 +423,7 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: PUT <host> <local> <remote>")
 	}
 	host, local, remote := string(args[0]), string(args[1]), string(args[2])
-	started := sendActionStart(s.out, s.cfg, s.bot, true, actionStartText("➡️ put", host))
+	started := sendActionStart(s.out, s.cfg, s.bot, true, transferStartAuditText(s.audit, "➡️ put", host, local, remote))
 	if err := copyToTarget(ctx, s.cfg, s.st, host, local, remote); err != nil {
 		s.finishAction(started, true, transferAuditText(s.audit, "➡️ put", host, local, remote, err.Error()))
 		return nil, err

@@ -507,7 +507,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		enqueueReply(out, bot, msg, reply)
 	}
 	if entry.async {
-		if start := commandStartText(name, fields); start != "" {
+		if start := commandStartText(audit, name, fields); start != "" {
 			started := sendActionReplyStart(out, bot, msg, true, start)
 			go func() {
 				reply, err := entry.fn(c, fields)
@@ -529,23 +529,31 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	run()
 }
 
-func commandStartText(name string, fields []string) string {
+func commandStartText(audit *auditState, name string, fields []string) string {
 	switch name {
 	case "run":
 		if len(fields) < 3 {
 			return ""
 		}
-		return actionStartText("▶️ run", fields[1])
+		return runStartAuditText(audit, fields[1], strings.Join(fields[2:], " "))
 	case "get":
 		if len(fields) < 3 {
 			return ""
 		}
-		return actionStartText("⬅️ get", fields[1])
+		localName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			localName = fields[3]
+		}
+		return transferStartAuditText(audit, "⬅️ get", fields[1], fields[2], localName)
 	case "put":
 		if len(fields) < 3 {
 			return ""
 		}
-		return actionStartText("➡️ put", fields[1])
+		remoteName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			remoteName = fields[3]
+		}
+		return transferStartAuditText(audit, "➡️ put", fields[1], fields[2], remoteName)
 	default:
 		return ""
 	}
@@ -1620,10 +1628,23 @@ func runText(target, command, output string) string {
 	return text + outputBlock(output)
 }
 
+func runStartText(target, command string) string {
+	return actionStartText("▶️ run", target) +
+		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>" +
+		"\n(waiting...)"
+}
+
 func runErrorText(target, command, output, reason string) string {
 	text := actionErrorText("▶️ run", target, reason) +
 		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
 	return text + outputBlock(output)
+}
+
+func runStartAuditText(a *auditState, target, command string) string {
+	if !auditFull(a) {
+		return actionStartText("▶️ run", target)
+	}
+	return runStartText(target, command)
 }
 
 func runAuditText(a *auditState, target, command, output, reason string) string {
@@ -1664,6 +1685,15 @@ func transferText(op, target, source, destination string) string {
 	return text
 }
 
+func transferStartText(op, target, source, destination string) string {
+	text := actionStartText(op, target) +
+		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+	if destination != source {
+		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+	}
+	return text + "\n(waiting...)"
+}
+
 func transferErrorText(op, target, source, destination, reason string) string {
 	text := actionErrorText(op, target, reason) +
 		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
@@ -1671,6 +1701,13 @@ func transferErrorText(op, target, source, destination, reason string) string {
 		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
 	}
 	return text
+}
+
+func transferStartAuditText(a *auditState, op, target, source, destination string) string {
+	if !auditFull(a) {
+		return actionStartText(op, target)
+	}
+	return transferStartText(op, target, source, destination)
 }
 
 func transferAuditText(a *auditState, op, target, source, destination, reason string) string {

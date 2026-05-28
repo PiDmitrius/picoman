@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.103"
+const version = "v0.1.104"
 
 func main() {
 	log.SetPrefix("picoman: ")

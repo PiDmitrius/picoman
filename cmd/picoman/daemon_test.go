@@ -139,6 +139,21 @@ func TestChatLogLevelKeepsRunErrorMinimal(t *testing.T) {
 	}
 }
 
+func TestStartTextFollowsLogLevel(t *testing.T) {
+	chat := commandStartText(newAuditState("chat"), "run", []string{"run", "host", "secret", "command"})
+	if got, want := chat, actionStartText("▶️ run", "host"); got != want {
+		t.Fatalf("chat start = %q, want %q", got, want)
+	}
+	if containsAny(chat, "secret", "command") {
+		t.Fatalf("chat start leaked command: %q", chat)
+	}
+
+	all := commandStartText(newAuditState("all"), "run", []string{"run", "host", "secret", "command"})
+	if !strings.Contains(all, "secret command") || !strings.Contains(all, "(waiting...)") {
+		t.Fatalf("all start did not include command and waiting marker: %q", all)
+	}
+}
+
 func TestAllLogLevelKeepsRunErrorDetails(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
