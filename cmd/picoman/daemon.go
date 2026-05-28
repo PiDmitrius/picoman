@@ -843,10 +843,25 @@ func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{}, errors.New("usage: loglevel <chat|all>")
 	}
 	level := fields[1]
-	if !c.audit.SetLogLevel(level) {
-		return cmdReply{}, errors.New("bad loglevel")
+	if err := setLogLevel(c.cfg, c.audit, level); err != nil {
+		return cmdReply{}, err
 	}
 	return cmdReply{text: "⚙️ loglevel " + level}, nil
+}
+
+func setLogLevel(cfg *config.Config, audit *auditState, level string) error {
+	if level != "chat" && level != "all" {
+		return errors.New("bad loglevel")
+	}
+	if cfg != nil {
+		if err := cfg.SetLogLevel(level); err != nil {
+			return fmt.Errorf("save loglevel: %w", err)
+		}
+	}
+	if audit != nil {
+		audit.SetLogLevel(level)
+	}
+	return nil
 }
 
 func commandName(s string) string {

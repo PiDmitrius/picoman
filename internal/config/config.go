@@ -254,6 +254,46 @@ func Save(c *Config) error {
 	return writeAtomic(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
+func (c *Config) SetLogLevel(level string) error {
+	if level != "chat" && level != "all" {
+		return fmt.Errorf("invalid log level %q", level)
+	}
+	c.mu.Lock()
+	old := c.LogLevel
+	c.LogLevel = level
+	c.mu.Unlock()
+	if err := saveConfigField("loglevel", level); err != nil {
+		c.mu.Lock()
+		c.LogLevel = old
+		c.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func saveConfigField(name string, value any) error {
+	path := filepath.Join(Dir(), "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	raw[name] = encoded
+	data, err = json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return writeAtomic(path, data, 0o600)
+}
+
 // writeAtomic writes content to path via temp+rename so the destination is
 // never observed half-written. Used for config and host DB (and known_hosts
 // goes through the same pattern in daemon.go).

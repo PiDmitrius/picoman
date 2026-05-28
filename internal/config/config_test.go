@@ -1,6 +1,9 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -64,5 +67,37 @@ func TestRemoveTargetDeletesHost(t *testing.T) {
 	}
 	if err := cfg.RemoveTarget("host"); err == nil {
 		t.Fatal("RemoveTarget accepted unknown host")
+	}
+}
+
+func TestSetLogLevelPersistsConfigField(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PICOMAN_CONFIG_DIR", dir)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"tg_token":"token","loglevel":"all"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{LogLevel: "all"}
+	if err := cfg.SetLogLevel("chat"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.LogLevel; got != "chat" {
+		t.Fatalf("LogLevel = %q, want chat", got)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := raw["loglevel"]; got != "chat" {
+		t.Fatalf("persisted loglevel = %q, want chat", got)
+	}
+	if got := raw["tg_token"]; got != "token" {
+		t.Fatalf("unrelated config field changed: %q", got)
 	}
 }

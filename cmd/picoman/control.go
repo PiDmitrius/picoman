@@ -310,8 +310,8 @@ func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 		return nil, errors.New("usage: LOGLEVEL <chat|all>")
 	}
 	level := string(args[0])
-	if !s.audit.SetLogLevel(level) {
-		return nil, errors.New("bad loglevel")
+	if err := setLogLevel(s.cfg, s.audit, level); err != nil {
+		return nil, err
 	}
 	notify(s.out, s.cfg, s.bot, false, "⚙️ loglevel "+level)
 	return nil, nil
