@@ -174,6 +174,7 @@ func notify(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, te
 type actionMessage struct {
 	chatID    int64
 	messageID int64
+	replyToID int64
 }
 
 func sendActionStart(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
@@ -182,7 +183,6 @@ func sendActionStart(out *outbox.Store, cfg *config.Config, bot *tg.Client, html
 		msg, err := sendDirectMessage(bot, userID, 0, html, text)
 		if err != nil {
 			log.Printf("send action start user=%d: %v", userID, err)
-			enqueueNotify(out, bot, userID, html, text)
 			continue
 		}
 		sent = append(sent, actionMessage{chatID: userID, messageID: msg.MessageID})
@@ -194,10 +194,9 @@ func sendActionReplyStart(out *outbox.Store, bot *tg.Client, msg tg.Message, htm
 	sent, err := sendDirectMessage(bot, msg.Chat.ID, msg.MessageID, html, text)
 	if err != nil {
 		log.Printf("send action reply start chat=%d: %v", msg.Chat.ID, err)
-		enqueueReply(out, bot, msg, cmdReply{text: text, html: html})
 		return nil
 	}
-	return []actionMessage{{chatID: msg.Chat.ID, messageID: sent.MessageID}}
+	return []actionMessage{{chatID: msg.Chat.ID, messageID: sent.MessageID, replyToID: msg.MessageID}}
 }
 
 func editActionMessages(out *outbox.Store, bot *tg.Client, messages []actionMessage, html bool, text string) {
@@ -207,7 +206,11 @@ func editActionMessages(out *outbox.Store, bot *tg.Client, messages []actionMess
 	for _, msg := range messages {
 		if err := editDirectMessage(bot, msg.chatID, msg.messageID, html, text); err != nil {
 			log.Printf("edit action message chat=%d message=%d: %v", msg.chatID, msg.messageID, err)
-			enqueueNotify(out, bot, msg.chatID, html, text)
+			if msg.replyToID > 0 {
+				enqueueReplyTo(out, bot, msg.chatID, msg.replyToID, cmdReply{text: text, html: html})
+			} else {
+				enqueueNotify(out, bot, msg.chatID, html, text)
+			}
 		}
 	}
 }
@@ -237,6 +240,9 @@ func editDirectMessage(bot *tg.Client, chatID, messageID int64, html bool, text 
 }
 
 func enqueueNotify(out *outbox.Store, bot *tg.Client, userID int64, html bool, text string) {
+	if text == "" {
+		return
+	}
 	var err error
 	if html {
 		err = out.EnqueueHTML(userID, text)
@@ -476,7 +482,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		// Silent drop: replying "denied" leaks bot existence to anyone who
 		// pings the chat. Journal record is enough for forensics.
-		log.Printf("deny user=%d username=%s text=%q", msg.From.ID, msg.From.Username, msg.Text)
+		log.Printf("deny user=%d username=%s command=%q", msg.From.ID, msg.From.Username, logCommandName(msg.Text))
 		return
 	}
 
@@ -508,13 +514,17 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	}
 	if entry.async {
 		if start := commandStartText(audit, name, fields); start != "" {
-			started := sendActionReplyStart(out, bot, msg, true, start)
 			go func() {
+				startedCh := make(chan []actionMessage, 1)
+				go func() {
+					startedCh <- sendActionReplyStart(out, bot, msg, true, start)
+				}()
 				reply, err := entry.fn(c, fields)
 				logCommand(msg, err)
 				if reply.text == "" && err != nil {
 					reply.text = errorText(err.Error())
 				}
+				started := <-startedCh
 				if len(started) > 0 {
 					editActionMessages(out, bot, started, reply.html, reply.text)
 					return
@@ -578,18 +588,22 @@ func logCommandName(text string) string {
 }
 
 func enqueueReply(out *outbox.Store, bot *tg.Client, msg tg.Message, r cmdReply) {
+	enqueueReplyTo(out, bot, msg.Chat.ID, msg.MessageID, r)
+}
+
+func enqueueReplyTo(out *outbox.Store, bot *tg.Client, chatID, replyToID int64, r cmdReply) {
 	if r.text == "" {
 		return
 	}
 	var err error
 	if r.html {
-		err = out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, r.text)
+		err = out.EnqueueHTMLReply(chatID, replyToID, r.text)
 	} else {
-		err = out.EnqueueReply(msg.Chat.ID, msg.MessageID, r.text)
+		err = out.EnqueueReply(chatID, replyToID, r.text)
 	}
 	if err != nil {
 		log.Printf("enqueue reply: %v", err)
-		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
+		go criticalNotifyUser(chatID, bot, "outbox", err)
 	}
 }
 

@@ -251,6 +251,8 @@ func Save(c *Config) error {
 	if err != nil {
 		return err
 	}
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	return writeAtomic(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
@@ -272,6 +274,8 @@ func (c *Config) SetLogLevel(level string) error {
 }
 
 func saveConfigField(name string, value any) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
 	path := filepath.Join(Dir(), "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -424,6 +428,7 @@ func normalize(c *Config) (*Config, error) {
 }
 
 var (
+	configFileMu sync.Mutex
 	targetNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	userRe       = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,31}$`)
 	hostRe       = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,253}$`)
