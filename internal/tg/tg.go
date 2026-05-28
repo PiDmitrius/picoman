@@ -66,6 +66,11 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) error {
+	_, err := c.SendMessageResult(ctx, chatID, text)
+	return err
+}
+
+func (c *Client) SendMessageResult(ctx context.Context, chatID int64, text string) (Message, error) {
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("text", text)
@@ -74,6 +79,11 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 }
 
 func (c *Client) SendHTML(ctx context.Context, chatID int64, text string) error {
+	_, err := c.SendHTMLResult(ctx, chatID, text)
+	return err
+}
+
+func (c *Client) SendHTMLResult(ctx context.Context, chatID int64, text string) (Message, error) {
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("text", text)
@@ -83,6 +93,11 @@ func (c *Client) SendHTML(ctx context.Context, chatID int64, text string) error 
 }
 
 func (c *Client) SendReply(ctx context.Context, chatID, replyToID int64, text string) error {
+	_, err := c.SendReplyResult(ctx, chatID, replyToID, text)
+	return err
+}
+
+func (c *Client) SendReplyResult(ctx context.Context, chatID, replyToID int64, text string) (Message, error) {
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("reply_to_message_id", strconv.FormatInt(replyToID, 10))
@@ -92,6 +107,11 @@ func (c *Client) SendReply(ctx context.Context, chatID, replyToID int64, text st
 }
 
 func (c *Client) SendHTMLReply(ctx context.Context, chatID, replyToID int64, text string) error {
+	_, err := c.SendHTMLReplyResult(ctx, chatID, replyToID, text)
+	return err
+}
+
+func (c *Client) SendHTMLReplyResult(ctx context.Context, chatID, replyToID int64, text string) (Message, error) {
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("reply_to_message_id", strconv.FormatInt(replyToID, 10))
@@ -101,11 +121,50 @@ func (c *Client) SendHTMLReply(ctx context.Context, chatID, replyToID int64, tex
 	return c.sendMessage(ctx, values)
 }
 
-func (c *Client) sendMessage(ctx context.Context, values url.Values) error {
+func (c *Client) sendMessage(ctx context.Context, values url.Values) (Message, error) {
+	var decoded struct {
+		OK     bool    `json:"ok"`
+		Result Message `json:"result"`
+	}
+	if err := c.call(ctx, http.MethodPost, "sendMessage", values, &decoded); err != nil {
+		return Message{}, err
+	}
+	if !decoded.OK {
+		return Message{}, fmt.Errorf("telegram returned ok=false")
+	}
+	return decoded.Result, nil
+}
+
+func (c *Client) EditMessage(ctx context.Context, chatID, messageID int64, text string) error {
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(chatID, 10))
+	values.Set("message_id", strconv.FormatInt(messageID, 10))
+	values.Set("text", text)
+
+	return c.editMessage(ctx, values)
+}
+
+func (c *Client) EditHTMLMessage(ctx context.Context, chatID, messageID int64, text string) error {
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(chatID, 10))
+	values.Set("message_id", strconv.FormatInt(messageID, 10))
+	values.Set("text", text)
+	values.Set("parse_mode", "HTML")
+
+	return c.editMessage(ctx, values)
+}
+
+func (c *Client) editMessage(ctx context.Context, values url.Values) error {
 	var decoded struct {
 		OK bool `json:"ok"`
 	}
-	return c.call(ctx, http.MethodPost, "sendMessage", values, &decoded)
+	if err := c.call(ctx, http.MethodPost, "editMessageText", values, &decoded); err != nil {
+		return err
+	}
+	if !decoded.OK {
+		return fmt.Errorf("telegram returned ok=false")
+	}
+	return nil
 }
 
 // APIError is a Telegram API error from a non-2xx response.
@@ -154,9 +213,9 @@ func (c *Client) call(ctx context.Context, method, apiMethod string, values url.
 	}
 	if resp.StatusCode != http.StatusOK {
 		var decoded struct {
-			ErrorCode  int    `json:"error_code"`
+			ErrorCode   int    `json:"error_code"`
 			Description string `json:"description"`
-			Parameters struct {
+			Parameters  struct {
 				RetryAfter int `json:"retry_after"`
 			} `json:"parameters"`
 		}

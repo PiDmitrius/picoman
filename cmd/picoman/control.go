@@ -310,8 +310,8 @@ func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 		return nil, errors.New("usage: LOGLEVEL <chat|all>")
 	}
 	level := string(args[0])
-	if !s.audit.SetLogLevel(level) {
-		return nil, errors.New("bad loglevel")
+	if err := setLogLevel(s.cfg, s.audit, level); err != nil {
+		return nil, err
 	}
 	notify(s.out, s.cfg, s.bot, false, "⚙️ loglevel "+level)
 	return nil, nil
@@ -322,21 +322,22 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: RUN <host> <command>")
 	}
 	host, command := string(args[0]), string(args[1])
+	startedCh := s.startAction(runStartAuditText(s.audit, host, command))
 	output, exitCode, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, err.Error()))
+		s.finishAction(startedCh, true, runAuditText(s.audit, host, command, output, err.Error()))
 		return nil, err
 	}
 	switch {
 	case exitCode == 255:
 		// ssh-level failure (connect/auth/protocol). Distinct from any
 		// remote exit 1..254 which we propagate transparently.
-		notify(s.out, s.cfg, s.bot, true, runErrorText(host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
+		s.finishAction(startedCh, true, runAuditText(s.audit, host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
 	case s.audit.LogLevel() == "all":
-		notify(s.out, s.cfg, s.bot, true, runText(host, command, output))
+		s.finishAction(startedCh, true, runText(host, command, output))
 	default:
-		notify(s.out, s.cfg, s.bot, true, actionText("▶️ run", host))
+		s.finishAction(startedCh, true, actionText("▶️ run", host))
 	}
 	return [][]byte{
 		[]byte(output),
@@ -349,11 +350,12 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: GET <host> <remote> <local>")
 	}
 	host, remote, local := string(args[0]), string(args[1]), string(args[2])
+	startedCh := s.startAction(transferStartAuditText(s.audit, "⬅️ get", host, remote, local))
 	if err := copyFromTarget(ctx, s.cfg, s.st, host, remote, local); err != nil {
-		notify(s.out, s.cfg, s.bot, true, transferErrorText("⬅️ get", host, remote, local, err.Error()))
+		s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, true, transferText("⬅️ get", host, remote, local))
+	s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, ""))
 	return nil, nil
 }
 
@@ -421,12 +423,32 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: PUT <host> <local> <remote>")
 	}
 	host, local, remote := string(args[0]), string(args[1]), string(args[2])
+	startedCh := s.startAction(transferStartAuditText(s.audit, "➡️ put", host, local, remote))
 	if err := copyToTarget(ctx, s.cfg, s.st, host, local, remote); err != nil {
-		notify(s.out, s.cfg, s.bot, true, transferErrorText("➡️ put", host, local, remote, err.Error()))
+		s.finishAction(startedCh, true, transferAuditText(s.audit, "➡️ put", host, local, remote, err.Error()))
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, true, transferText("➡️ put", host, local, remote))
+	s.finishAction(startedCh, true, transferAuditText(s.audit, "➡️ put", host, local, remote, ""))
 	return nil, nil
+}
+
+func (s *controlServer) startAction(text string) <-chan []actionMessage {
+	ch := make(chan []actionMessage, 1)
+	go func() {
+		ch <- sendActionStart(s.cfg, s.bot, true, text)
+	}()
+	return ch
+}
+
+func (s *controlServer) finishAction(startedCh <-chan []actionMessage, html bool, text string) {
+	go func() {
+		started := <-startedCh
+		if len(started) > 0 {
+			editActionMessages(s.out, s.bot, started, html, text)
+			return
+		}
+		notify(s.out, s.cfg, s.bot, html, text)
+	}()
 }
 
 // --- CLI ---

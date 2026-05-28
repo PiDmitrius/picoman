@@ -171,6 +171,90 @@ func notify(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, te
 	}
 }
 
+type actionMessage struct {
+	chatID    int64
+	messageID int64
+	replyToID int64
+}
+
+func sendActionStart(cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
+	sent := make([]actionMessage, 0, len(cfg.AllowedUsers))
+	for _, userID := range cfg.AllowedUsers {
+		msg, err := sendDirectMessage(bot, userID, 0, html, text)
+		if err != nil {
+			log.Printf("send action start user=%d: %v", userID, err)
+			continue
+		}
+		sent = append(sent, actionMessage{chatID: userID, messageID: msg.MessageID})
+	}
+	return sent
+}
+
+func sendActionReplyStart(bot *tg.Client, msg tg.Message, html bool, text string) []actionMessage {
+	sent, err := sendDirectMessage(bot, msg.Chat.ID, msg.MessageID, html, text)
+	if err != nil {
+		log.Printf("send action reply start chat=%d: %v", msg.Chat.ID, err)
+		return nil
+	}
+	return []actionMessage{{chatID: msg.Chat.ID, messageID: sent.MessageID, replyToID: msg.MessageID}}
+}
+
+func editActionMessages(out *outbox.Store, bot *tg.Client, messages []actionMessage, html bool, text string) {
+	if len(messages) == 0 {
+		return
+	}
+	for _, msg := range messages {
+		if err := editDirectMessage(bot, msg.chatID, msg.messageID, html, text); err != nil {
+			log.Printf("edit action message chat=%d message=%d: %v", msg.chatID, msg.messageID, err)
+			if msg.replyToID > 0 {
+				enqueueReplyTo(out, bot, msg.chatID, msg.replyToID, cmdReply{text: text, html: html})
+			} else {
+				enqueueNotify(out, bot, msg.chatID, html, text)
+			}
+		}
+	}
+}
+
+func sendDirectMessage(bot *tg.Client, chatID, replyToID int64, html bool, text string) (tg.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	switch {
+	case html && replyToID > 0:
+		return bot.SendHTMLReplyResult(ctx, chatID, replyToID, text)
+	case html:
+		return bot.SendHTMLResult(ctx, chatID, text)
+	case replyToID > 0:
+		return bot.SendReplyResult(ctx, chatID, replyToID, text)
+	default:
+		return bot.SendMessageResult(ctx, chatID, text)
+	}
+}
+
+func editDirectMessage(bot *tg.Client, chatID, messageID int64, html bool, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if html {
+		return bot.EditHTMLMessage(ctx, chatID, messageID, text)
+	}
+	return bot.EditMessage(ctx, chatID, messageID, text)
+}
+
+func enqueueNotify(out *outbox.Store, bot *tg.Client, userID int64, html bool, text string) {
+	if text == "" {
+		return
+	}
+	var err error
+	if html {
+		err = out.EnqueueHTML(userID, text)
+	} else {
+		err = out.Enqueue(userID, text)
+	}
+	if err != nil {
+		log.Printf("enqueue notify user=%d: %v", userID, err)
+		go criticalNotifyUser(userID, bot, "outbox", err)
+	}
+}
+
 func criticalNotifyUsers(cfg *config.Config, bot *tg.Client, name string, err error) {
 	for _, userID := range cfg.AllowedUsers {
 		criticalNotifyUser(userID, bot, name, err)
@@ -398,7 +482,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	if !config.AllowedSet(cfg)[msg.From.ID] {
 		// Silent drop: replying "denied" leaks bot existence to anyone who
 		// pings the chat. Journal record is enough for forensics.
-		log.Printf("deny user=%d username=%s text=%q", msg.From.ID, msg.From.Username, msg.Text)
+		log.Printf("deny user=%d username=%s command=%q", msg.From.ID, msg.From.Username, logCommandName(msg.Text))
 		return
 	}
 
@@ -429,33 +513,97 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		enqueueReply(out, bot, msg, reply)
 	}
 	if entry.async {
+		if start := commandStartText(audit, name, fields); start != "" {
+			go func() {
+				startedCh := make(chan []actionMessage, 1)
+				go func() {
+					startedCh <- sendActionReplyStart(bot, msg, true, start)
+				}()
+				reply, err := entry.fn(c, fields)
+				logCommand(msg, err)
+				if reply.text == "" && err != nil {
+					reply.text = errorText(err.Error())
+				}
+				started := <-startedCh
+				if len(started) > 0 {
+					editActionMessages(out, bot, started, reply.html, reply.text)
+					return
+				}
+				enqueueReply(out, bot, msg, reply)
+			}()
+			return
+		}
 		go run()
 		return
 	}
 	run()
 }
 
+func commandStartText(audit *auditState, name string, fields []string) string {
+	switch name {
+	case "run":
+		if len(fields) < 3 {
+			return ""
+		}
+		return runStartAuditText(audit, fields[1], strings.Join(fields[2:], " "))
+	case "get":
+		if len(fields) < 3 {
+			return ""
+		}
+		localName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			localName = fields[3]
+		}
+		return transferStartAuditText(audit, "⬅️ get", fields[1], fields[2], localName)
+	case "put":
+		if len(fields) < 3 {
+			return ""
+		}
+		remoteName := defaultTransferName(fields[2])
+		if len(fields) >= 4 {
+			remoteName = fields[3]
+		}
+		return transferStartAuditText(audit, "➡️ put", fields[1], fields[2], remoteName)
+	default:
+		return ""
+	}
+}
+
 func logCommand(msg tg.Message, err error) {
+	name := logCommandName(msg.Text)
 	if err != nil {
-		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, msg.Text, err)
+		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, name, err)
 		return
 	}
-	log.Printf("command ok user=%d command=%q", msg.From.ID, msg.Text)
+	log.Printf("command ok user=%d command=%q", msg.From.ID, name)
+}
+
+func logCommandName(text string) string {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return ""
+	}
+	name, _ := normalizeCommandFields(fields)
+	return name
 }
 
 func enqueueReply(out *outbox.Store, bot *tg.Client, msg tg.Message, r cmdReply) {
+	enqueueReplyTo(out, bot, msg.Chat.ID, msg.MessageID, r)
+}
+
+func enqueueReplyTo(out *outbox.Store, bot *tg.Client, chatID, replyToID int64, r cmdReply) {
 	if r.text == "" {
 		return
 	}
 	var err error
 	if r.html {
-		err = out.EnqueueHTMLReply(msg.Chat.ID, msg.MessageID, r.text)
+		err = out.EnqueueHTMLReply(chatID, replyToID, r.text)
 	} else {
-		err = out.EnqueueReply(msg.Chat.ID, msg.MessageID, r.text)
+		err = out.EnqueueReply(chatID, replyToID, r.text)
 	}
 	if err != nil {
 		log.Printf("enqueue reply: %v", err)
-		go criticalNotifyUser(msg.Chat.ID, bot, "outbox", err)
+		go criticalNotifyUser(chatID, bot, "outbox", err)
 	}
 }
 
@@ -667,22 +815,25 @@ func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
 	// the remote command's own exit code — propagate transparently.
 	if err != nil {
 		return cmdReply{
-			text: runErrorText(target, command, output, err.Error()),
+			text: runAuditText(c.audit, target, command, output, err.Error()),
 			html: true,
 		}, err
 	}
 	if exitCode == 255 {
 		return cmdReply{
-			text: runErrorText(target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
+			text: runAuditText(c.audit, target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
 			html: true,
 		}, errors.New("ssh: exit status 255")
 	}
-	return cmdReply{text: runText(target, command, output), html: true}, nil
+	return cmdReply{text: runAuditText(c.audit, target, command, output, ""), html: true}, nil
 }
 
 func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 	text, err := handleGet(c.ctx, c.cfg, c.st, fields)
 	if err == nil {
+		if len(fields) >= 2 && !auditFull(c.audit) {
+			return cmdReply{text: actionText("⬅️ get", fields[1]), html: true}, nil
+		}
 		return cmdReply{text: text, html: true}, nil
 	}
 	if len(fields) < 3 {
@@ -693,7 +844,7 @@ func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 		localName = fields[3]
 	}
 	return cmdReply{
-		text: transferErrorText("⬅️ get", fields[1], fields[2], localName, err.Error()),
+		text: transferAuditText(c.audit, "⬅️ get", fields[1], fields[2], localName, err.Error()),
 		html: true,
 	}, err
 }
@@ -701,6 +852,9 @@ func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
 func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 	text, err := handlePut(c.ctx, c.cfg, c.st, fields)
 	if err == nil {
+		if len(fields) >= 2 && !auditFull(c.audit) {
+			return cmdReply{text: actionText("➡️ put", fields[1]), html: true}, nil
+		}
 		return cmdReply{text: text, html: true}, nil
 	}
 	if len(fields) < 3 {
@@ -711,7 +865,7 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 		remoteName = fields[3]
 	}
 	return cmdReply{
-		text: transferErrorText("➡️ put", fields[1], fields[2], remoteName, err.Error()),
+		text: transferAuditText(c.audit, "➡️ put", fields[1], fields[2], remoteName, err.Error()),
 		html: true,
 	}, err
 }
@@ -721,10 +875,25 @@ func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdReply{}, errors.New("usage: loglevel <chat|all>")
 	}
 	level := fields[1]
-	if !c.audit.SetLogLevel(level) {
-		return cmdReply{}, errors.New("bad loglevel")
+	if err := setLogLevel(c.cfg, c.audit, level); err != nil {
+		return cmdReply{}, err
 	}
 	return cmdReply{text: "⚙️ loglevel " + level}, nil
+}
+
+func setLogLevel(cfg *config.Config, audit *auditState, level string) error {
+	if level != "chat" && level != "all" {
+		return errors.New("bad loglevel")
+	}
+	if cfg != nil {
+		if err := cfg.SetLogLevel(level); err != nil {
+			return fmt.Errorf("save loglevel: %w", err)
+		}
+	}
+	if audit != nil {
+		audit.SetLogLevel(level)
+	}
+	return nil
 }
 
 func commandName(s string) string {
@@ -1469,25 +1638,55 @@ const (
 
 func runText(target, command, output string) string {
 	text := actionText("▶️ run", target) +
-		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
+		"\n" + htmlBlock(command, maxCommandBytes)
 	return text + outputBlock(output)
+}
+
+func runStartText(target, command string) string {
+	return actionStartText("▶️ run", target) +
+		"\n" + htmlBlock(command, maxCommandBytes)
 }
 
 func runErrorText(target, command, output, reason string) string {
 	text := actionErrorText("▶️ run", target, reason) +
-		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
+		"\n" + htmlBlock(command, maxCommandBytes)
 	return text + outputBlock(output)
+}
+
+func runStartAuditText(a *auditState, target, command string) string {
+	if !auditFull(a) {
+		return actionStartText("▶️ run", target)
+	}
+	return runStartText(target, command)
+}
+
+func runAuditText(a *auditState, target, command, output, reason string) string {
+	if !auditFull(a) {
+		return actionText("▶️ run", target)
+	}
+	if reason != "" {
+		return runErrorText(target, command, output, reason)
+	}
+	return runText(target, command, output)
 }
 
 func outputBlock(output string) string {
 	if output == "" {
 		return "\n(no output)"
 	}
-	return "\n<pre><code>" + escapedCodeBlock(output, maxOutputBytes) + "</code></pre>"
+	return "\n" + htmlBlock(output, maxOutputBytes)
+}
+
+func htmlBlock(s string, budget int) string {
+	return "<pre>" + escapedCodeBlock(s, budget) + "</pre>"
 }
 
 func actionText(action, target string) string {
 	return html.EscapeString(action) + " <b>" + html.EscapeString(target) + "</b>"
+}
+
+func actionStartText(action, target string) string {
+	return "⏳ " + actionText(action, target)
 }
 
 func actionErrorText(action, target, reason string) string {
@@ -1496,18 +1695,48 @@ func actionErrorText(action, target, reason string) string {
 
 func transferText(op, target, source, destination string) string {
 	text := actionText(op, target) +
-		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+		"\n" + htmlBlock(source, maxPathBytes)
 	if destination != source {
-		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+		text += "\n" + htmlBlock(destination, maxPathBytes)
+	}
+	return text
+}
+
+func transferStartText(op, target, source, destination string) string {
+	text := actionStartText(op, target) +
+		"\n" + htmlBlock(source, maxPathBytes)
+	if destination != source {
+		text += "\n" + htmlBlock(destination, maxPathBytes)
 	}
 	return text
 }
 
 func transferErrorText(op, target, source, destination, reason string) string {
 	text := actionErrorText(op, target, reason) +
-		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+		"\n" + htmlBlock(source, maxPathBytes)
 	if destination != source {
-		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+		text += "\n" + htmlBlock(destination, maxPathBytes)
 	}
 	return text
+}
+
+func transferStartAuditText(a *auditState, op, target, source, destination string) string {
+	if !auditFull(a) {
+		return actionStartText(op, target)
+	}
+	return transferStartText(op, target, source, destination)
+}
+
+func transferAuditText(a *auditState, op, target, source, destination, reason string) string {
+	if !auditFull(a) {
+		return actionText(op, target)
+	}
+	if reason != "" {
+		return transferErrorText(op, target, source, destination, reason)
+	}
+	return transferText(op, target, source, destination)
+}
+
+func auditFull(a *auditState) bool {
+	return a != nil && a.LogLevel() == "all"
 }
