@@ -435,18 +435,20 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 func (s *controlServer) startAction(text string) <-chan []actionMessage {
 	ch := make(chan []actionMessage, 1)
 	go func() {
-		ch <- sendActionStart(s.out, s.cfg, s.bot, true, text)
+		ch <- sendActionStart(s.cfg, s.bot, true, text)
 	}()
 	return ch
 }
 
 func (s *controlServer) finishAction(startedCh <-chan []actionMessage, html bool, text string) {
-	started := <-startedCh
-	if len(started) > 0 {
-		editActionMessages(s.out, s.bot, started, html, text)
-		return
-	}
-	notify(s.out, s.cfg, s.bot, html, text)
+	go func() {
+		started := <-startedCh
+		if len(started) > 0 {
+			editActionMessages(s.out, s.bot, started, html, text)
+			return
+		}
+		notify(s.out, s.cfg, s.bot, html, text)
+	}()
 }
 
 // --- CLI ---

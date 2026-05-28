@@ -177,7 +177,7 @@ type actionMessage struct {
 	replyToID int64
 }
 
-func sendActionStart(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
+func sendActionStart(cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
 	sent := make([]actionMessage, 0, len(cfg.AllowedUsers))
 	for _, userID := range cfg.AllowedUsers {
 		msg, err := sendDirectMessage(bot, userID, 0, html, text)
@@ -190,7 +190,7 @@ func sendActionStart(out *outbox.Store, cfg *config.Config, bot *tg.Client, html
 	return sent
 }
 
-func sendActionReplyStart(out *outbox.Store, bot *tg.Client, msg tg.Message, html bool, text string) []actionMessage {
+func sendActionReplyStart(bot *tg.Client, msg tg.Message, html bool, text string) []actionMessage {
 	sent, err := sendDirectMessage(bot, msg.Chat.ID, msg.MessageID, html, text)
 	if err != nil {
 		log.Printf("send action reply start chat=%d: %v", msg.Chat.ID, err)
@@ -517,7 +517,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 			go func() {
 				startedCh := make(chan []actionMessage, 1)
 				go func() {
-					startedCh <- sendActionReplyStart(out, bot, msg, true, start)
+					startedCh <- sendActionReplyStart(bot, msg, true, start)
 				}()
 				reply, err := entry.fn(c, fields)
 				logCommand(msg, err)
