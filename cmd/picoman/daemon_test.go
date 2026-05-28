@@ -43,6 +43,15 @@ func TestNormalizeCommandFieldsKeepsRegularUnlock(t *testing.T) {
 	}
 }
 
+func TestLogCommandNameDoesNotIncludeArguments(t *testing.T) {
+	if got, want := logCommandName("/run host secret command"), "run"; got != want {
+		t.Fatalf("logCommandName = %q, want %q", got, want)
+	}
+	if got, want := logCommandName("/unlock_1h"), "unlock"; got != want {
+		t.Fatalf("logCommandName = %q, want %q", got, want)
+	}
+}
+
 func TestParseGroupSelectorRequiresAtPrefix(t *testing.T) {
 	group, err := parseGroupSelector("@caddy")
 	if err != nil {

@@ -552,11 +552,21 @@ func commandStartText(name string, fields []string) string {
 }
 
 func logCommand(msg tg.Message, err error) {
+	name := logCommandName(msg.Text)
 	if err != nil {
-		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, msg.Text, err)
+		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, name, err)
 		return
 	}
-	log.Printf("command ok user=%d command=%q", msg.From.ID, msg.Text)
+	log.Printf("command ok user=%d command=%q", msg.From.ID, name)
+}
+
+func logCommandName(text string) string {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return ""
+	}
+	name, _ := normalizeCommandFields(fields)
+	return name
 }
 
 func enqueueReply(out *outbox.Store, bot *tg.Client, msg tg.Message, r cmdReply) {
