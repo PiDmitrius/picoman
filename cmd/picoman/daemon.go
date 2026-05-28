@@ -1624,19 +1624,18 @@ const (
 
 func runText(target, command, output string) string {
 	text := actionText("▶️ run", target) +
-		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
+		"\n" + htmlBlock(command, maxCommandBytes)
 	return text + outputBlock(output)
 }
 
 func runStartText(target, command string) string {
 	return actionStartText("▶️ run", target) +
-		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>" +
-		"\n(waiting...)"
+		"\n" + htmlBlock(command, maxCommandBytes)
 }
 
 func runErrorText(target, command, output, reason string) string {
 	text := actionErrorText("▶️ run", target, reason) +
-		"\n<pre><code>" + escapedCodeBlock(command, maxCommandBytes) + "</code></pre>"
+		"\n" + htmlBlock(command, maxCommandBytes)
 	return text + outputBlock(output)
 }
 
@@ -1661,7 +1660,11 @@ func outputBlock(output string) string {
 	if output == "" {
 		return "\n(no output)"
 	}
-	return "\n<pre><code>" + escapedCodeBlock(output, maxOutputBytes) + "</code></pre>"
+	return "\n" + htmlBlock(output, maxOutputBytes)
+}
+
+func htmlBlock(s string, budget int) string {
+	return "<pre>" + escapedCodeBlock(s, budget) + "</pre>"
 }
 
 func actionText(action, target string) string {
@@ -1678,27 +1681,27 @@ func actionErrorText(action, target, reason string) string {
 
 func transferText(op, target, source, destination string) string {
 	text := actionText(op, target) +
-		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+		"\n" + htmlBlock(source, maxPathBytes)
 	if destination != source {
-		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+		text += "\n" + htmlBlock(destination, maxPathBytes)
 	}
 	return text
 }
 
 func transferStartText(op, target, source, destination string) string {
 	text := actionStartText(op, target) +
-		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+		"\n" + htmlBlock(source, maxPathBytes)
 	if destination != source {
-		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+		text += "\n" + htmlBlock(destination, maxPathBytes)
 	}
-	return text + "\n(waiting...)"
+	return text
 }
 
 func transferErrorText(op, target, source, destination, reason string) string {
 	text := actionErrorText(op, target, reason) +
-		"\n<pre><code>" + escapedCodeBlock(source, maxPathBytes) + "</code></pre>"
+		"\n" + htmlBlock(source, maxPathBytes)
 	if destination != source {
-		text += "\n<pre><code>" + escapedCodeBlock(destination, maxPathBytes) + "</code></pre>"
+		text += "\n" + htmlBlock(destination, maxPathBytes)
 	}
 	return text
 }

@@ -149,8 +149,11 @@ func TestStartTextFollowsLogLevel(t *testing.T) {
 	}
 
 	all := commandStartText(newAuditState("all"), "run", []string{"run", "host", "secret", "command"})
-	if !strings.Contains(all, "secret command") || !strings.Contains(all, "(waiting...)") {
-		t.Fatalf("all start did not include command and waiting marker: %q", all)
+	if !strings.Contains(all, "secret command") {
+		t.Fatalf("all start did not include command: %q", all)
+	}
+	if strings.Contains(all, "(waiting...)") {
+		t.Fatalf("all start has redundant waiting marker: %q", all)
 	}
 }
 
