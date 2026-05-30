@@ -32,6 +32,26 @@ func TestNormalizeCommandFieldsKeepsVersionCommands(t *testing.T) {
 	}
 }
 
+func TestNormalizeCommandFieldsSplitsUnlockMax(t *testing.T) {
+	name, fields := normalizeCommandFields([]string{"/unlock_max"})
+	if name != "unlock" {
+		t.Fatalf("name = %q, want unlock", name)
+	}
+	want := []string{"/unlock", "max"}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("fields = %#v, want %#v", fields, want)
+	}
+}
+
+func TestHandleUnlockMaxUsesMaxTTL(t *testing.T) {
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Hour)
+	if _, err := handleUnlock([]string{"/unlock", "max"}, st, 2*time.Hour); err == nil {
+		t.Fatal("handleUnlock succeeded with locked key")
+	} else if strings.Contains(err.Error(), "bad ttl") {
+		t.Fatalf("max argument was parsed as duration: %v", err)
+	}
+}
+
 func TestNormalizeCommandFieldsKeepsRegularUnlock(t *testing.T) {
 	in := []string{"/unlock", "5m"}
 	name, fields := normalizeCommandFields(in)

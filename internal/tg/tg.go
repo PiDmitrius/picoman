@@ -248,3 +248,29 @@ func redactToken(err error, token string) error {
 	}
 	return fmt.Errorf("%s", strings.ReplaceAll(msg, token, "<redacted>"))
 }
+
+// BotCommand is one entry in the Telegram command menu.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands sets the bot command menu shown to users.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	data, err := json.Marshal(commands)
+	if err != nil {
+		return err
+	}
+	values := url.Values{}
+	values.Set("commands", string(data))
+	var decoded struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.call(ctx, http.MethodPost, "setMyCommands", values, &decoded); err != nil {
+		return err
+	}
+	if !decoded.OK {
+		return fmt.Errorf("telegram returned ok=false")
+	}
+	return nil
+}

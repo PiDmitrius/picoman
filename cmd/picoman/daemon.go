@@ -101,6 +101,14 @@ func runDaemon() {
 	// slow or interactive unseal command. Notifies separately when done.
 	go startupAutoUnseal(ctx, cfg, st, out, bot)
 
+	// Menu is decorative; publish it in the background so a slow setMyCommands
+	// never delays the Telegram control loop.
+	go func() {
+		if err := bot.SetMyCommands(ctx, menuCommands); err != nil {
+			log.Printf("set commands: %v", err)
+		}
+	}()
+
 	offset := out.TelegramOffset()
 	backoff := time.Second
 	for {
@@ -443,6 +451,7 @@ type cmdCtx struct {
 	cfg   *config.Config
 	st    *agent.State
 	audit *auditState
+	bot   *tg.Client
 }
 
 type cmdReply struct {
@@ -476,6 +485,7 @@ var commands = map[string]cmdEntry{
 	"get":      {fn: cmdGet, async: true},
 	"put":      {fn: cmdPut, async: true},
 	"loglevel": {fn: cmdLogLevel},
+	"menu":     {fn: cmdMenu, async: true},
 }
 
 func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, audit *auditState, bot *tg.Client, msg tg.Message) {
@@ -503,7 +513,7 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		return
 	}
 
-	c := cmdCtx{ctx: ctx, cfg: cfg, st: st, audit: audit}
+	c := cmdCtx{ctx: ctx, cfg: cfg, st: st, audit: audit, bot: bot}
 	run := func() {
 		reply, err := entry.fn(c, fields)
 		logCommand(msg, err)
@@ -761,8 +771,22 @@ func hostAdd(cfg *config.Config, args []string) (cmdReply, error) {
 	}
 }
 
+var menuCommands = []tg.BotCommand{
+	{Command: "status", Description: "\u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435"},
+	{Command: "unlock", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (5m)"},
+	{Command: "unlock_max", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (max)"},
+	{Command: "lock", Description: "\u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c"},
+}
+
+func cmdMenu(c cmdCtx, _ []string) (cmdReply, error) {
+	if err := c.bot.SetMyCommands(c.ctx, menuCommands); err != nil {
+		return cmdReply{}, err
+	}
+	return cmdReply{text: "\u2705 menu set"}, nil
+}
+
 func cmdUnlock(c cmdCtx, fields []string) (cmdReply, error) {
-	text, err := handleUnlock(fields, c.st)
+	text, err := handleUnlock(fields, c.st, config.MaxTTL(c.cfg))
 	return cmdReply{text: text}, err
 }
 
@@ -926,6 +950,7 @@ commands:
 /unlock 5m
 /unlock
 /unlock_1h
+/unlock_max
 /seal
 /lock
 /status
@@ -944,19 +969,24 @@ commands:
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
 /loglevel <chat|all>
+/menu
 `)
 }
 
-func handleUnlock(fields []string, st *agent.State) (string, error) {
+func handleUnlock(fields []string, st *agent.State, maxTTL time.Duration) (string, error) {
 	ttl := 5 * time.Minute
 	if len(fields) > 2 {
 		return "", errors.New("usage: /unlock [5m]")
 	}
 	if len(fields) == 2 {
-		var err error
-		ttl, err = time.ParseDuration(fields[1])
-		if err != nil {
-			return "", fmt.Errorf("bad ttl: %w", err)
+		if fields[1] == "max" {
+			ttl = maxTTL
+		} else {
+			var err error
+			ttl, err = time.ParseDuration(fields[1])
+			if err != nil {
+				return "", fmt.Errorf("bad ttl: %w", err)
+			}
 		}
 	}
 
