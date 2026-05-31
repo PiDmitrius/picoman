@@ -1324,10 +1324,10 @@ func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if len(fields) == 4 {
 		localName = fields[3]
 	}
-	if err := copyFromTarget(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
+	if err := copyFromTargetSelector(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
 		return "", err
 	}
-	return transferText("⬅️ get", fields[1], fields[2], localName), nil
+	return transferText("⬅️ get", fields[1], fields[2], groupGetLocalDisplay(fields[1], localName)), nil
 }
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -1338,7 +1338,7 @@ func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if len(fields) == 4 {
 		remoteName = fields[3]
 	}
-	if err := copyToTarget(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
+	if err := copyToTargetSelector(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
 		return "", err
 	}
 	return transferText("➡️ put", fields[1], fields[2], remoteName), nil
@@ -1347,6 +1347,13 @@ func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 func defaultTransferName(name string) string {
 	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
 	return path.Base(clean)
+}
+
+func groupGetLocalDisplay(selector, localName string) string {
+	if strings.HasPrefix(selector, "@") {
+		return path.Join("<host>", localName)
+	}
+	return localName
 }
 
 func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (output string, exitCode int, err error) {
@@ -1486,6 +1493,30 @@ func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, ta
 	return runSCP(ctx, st.Socket(), t, remoteSpec(t, remotePath), localPath)
 }
 
+func copyFromTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, remoteName, localName string) error {
+	if !strings.HasPrefix(selector, "@") {
+		return copyFromTarget(ctx, cfg, st, selector, remoteName, localName)
+	}
+	hosts, err := hostsForGroupSelector(cfg, selector)
+	if err != nil {
+		return err
+	}
+	if !st.IsUnlocked() {
+		return errors.New("key is locked")
+	}
+	var errs []string
+	for _, host := range hosts {
+		hostLocalName := path.Join(host, localName)
+		if err := copyFromTarget(ctx, cfg, st, host, remoteName, hostLocalName); err != nil {
+			errs = append(errs, host+": "+err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targetName, localName, remoteName string) error {
 	t, err := targetForSSH(cfg, st, targetName)
 	if err != nil {
@@ -1513,6 +1544,50 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 		return fmt.Errorf("mkdir -p: exit status %d: %s", code, strings.TrimSpace(mkOut))
 	}
 	return runSCP(ctx, st.Socket(), t, localPath, remoteSpec(t, remotePath))
+}
+
+func copyToTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, localName, remoteName string) error {
+	if !strings.HasPrefix(selector, "@") {
+		return copyToTarget(ctx, cfg, st, selector, localName, remoteName)
+	}
+	hosts, err := hostsForGroupSelector(cfg, selector)
+	if err != nil {
+		return err
+	}
+	if !st.IsUnlocked() {
+		return errors.New("key is locked")
+	}
+	localPath, err := localWorkPath(cfg, localName)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(localPath); err != nil {
+		return err
+	} else if info.IsDir() {
+		return errors.New("local file is directory")
+	}
+	var errs []string
+	for _, host := range hosts {
+		if err := copyToTarget(ctx, cfg, st, host, localName, remoteName); err != nil {
+			errs = append(errs, host+": "+err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func hostsForGroupSelector(cfg *config.Config, selector string) ([]string, error) {
+	group, err := parseGroupSelector(selector)
+	if err != nil {
+		return nil, err
+	}
+	hosts := groupHosts(cfg, group)
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("group %q is empty", selector)
+	}
+	return hosts, nil
 }
 
 func localWorkPath(cfg *config.Config, name string) (string, error) {
