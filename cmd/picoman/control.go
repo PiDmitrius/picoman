@@ -48,7 +48,6 @@ func (s *controlServer) handlers() map[string]controlHandler {
 	return map[string]controlHandler{
 		"UNSEAL":    bind(s.unseal),
 		"SEAL":      bind(s.seal),
-		"UNLOCK":    bind(s.unlock),
 		"LOCK":      bind(s.lock),
 		"LOGLEVEL":  bind(s.loglevel),
 		"RUN":       s.run,
@@ -280,22 +279,6 @@ func (s *controlServer) seal(_ [][]byte) ([][]byte, error) {
 	return nil, nil
 }
 
-func (s *controlServer) unlock(args [][]byte) ([][]byte, error) {
-	if len(args) != 1 {
-		return nil, errors.New("usage: UNLOCK <ttl>")
-	}
-	ttl, err := time.ParseDuration(string(args[0]))
-	if err != nil {
-		return nil, fmt.Errorf("bad ttl: %w", err)
-	}
-	if err := s.st.Unlock(ttl); err != nil {
-		notify(s.out, s.cfg, s.bot, false, errorText("unlock failed: "+err.Error()))
-		return nil, err
-	}
-	notify(s.out, s.cfg, s.bot, false, "🟡 unlocked ("+leftText(s.st.Until())+")")
-	return nil, nil
-}
-
 func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
 	if err := s.st.Lock(); err != nil {
 		notify(s.out, s.cfg, s.bot, false, errorText("lock failed: "+err.Error()))
@@ -491,18 +474,6 @@ func resolveCLIUnseal(args []string) (string, error) {
 func runSeal() { simpleControl("SEAL") }
 func runLock() { simpleControl("LOCK") }
 
-func runUnlock(args []string) {
-	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: picoman unlock [5m]")
-		os.Exit(1)
-	}
-	ttl := "5m"
-	if len(args) == 1 {
-		ttl = args[0]
-	}
-	simpleControl("UNLOCK", ttl)
-}
-
 func runLocalRun(args []string) {
 	target, command, err := resolveRunCommand(args)
 	if err != nil {
@@ -513,7 +484,7 @@ func runLocalRun(args []string) {
 	if err != nil {
 		// Transport-level failure (target unknown, key locked, ssh couldn't
 		// start). Use 255 to match ssh's own "something went wrong" exit code.
-		fmt.Fprintln(os.Stderr, err)
+		printOpError(err)
 		os.Exit(255)
 	}
 	if len(parts) > 0 && len(parts[0]) > 0 {
@@ -561,7 +532,7 @@ func runLocalGet(args []string) {
 	if len(args) == 3 {
 		localName = args[2]
 	}
-	simpleControl("GET", args[0], args[1], localName)
+	opControl("GET", args[0], args[1], localName)
 }
 
 func runLocalPut(args []string) {
@@ -573,7 +544,7 @@ func runLocalPut(args []string) {
 	if len(args) == 3 {
 		remoteName = args[2]
 	}
-	simpleControl("PUT", args[0], args[1], remoteName)
+	opControl("PUT", args[0], args[1], remoteName)
 }
 
 func runLogLevel(args []string) {
@@ -859,6 +830,33 @@ func simpleControl(verb string, args ...string) {
 	parts, err := requestControl(verb, args...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if len(parts) > 0 && len(parts[0]) > 0 {
+		os.Stdout.Write(parts[0])
+		if !strings.HasSuffix(string(parts[0]), "\n") {
+			fmt.Println()
+		}
+	}
+}
+
+// printOpError reports a control error for an operator-run run/get/put. Unlock
+// is reachable only by the user from Telegram, so when the daemon reports the
+// key is locked the operator cannot fix it locally — point them at the user.
+func printOpError(err error) {
+	if strings.Contains(err.Error(), "key is locked") {
+		fmt.Fprintln(os.Stderr, "key is locked, ask user to unlock")
+		return
+	}
+	fmt.Fprintln(os.Stderr, err)
+}
+
+// opControl runs a run/get/put-style request and routes failures through
+// printOpError so the locked-key hint is shown.
+func opControl(verb string, args ...string) {
+	parts, err := requestControl(verb, args...)
+	if err != nil {
+		printOpError(err)
 		os.Exit(1)
 	}
 	if len(parts) > 0 && len(parts[0]) > 0 {

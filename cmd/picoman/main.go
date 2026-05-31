@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.111"
+const version = "v0.1.112"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -44,8 +44,6 @@ func main() {
 		runUnseal(os.Args[2:])
 	case "seal":
 		runSeal()
-	case "unlock":
-		runUnlock(os.Args[2:])
 	case "lock":
 		runLock()
 	case "run":
@@ -93,7 +91,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Key state (daemon required):")
 	fmt.Fprintln(os.Stderr, "  unseal [<passphrase>]              Unseal daemon (arg | piped stdin | configured/default command on tty)")
 	fmt.Fprintln(os.Stderr, "  seal                               Forget key passphrase")
-	fmt.Fprintln(os.Stderr, "  unlock [<ttl>]                     Load SSH key for ttl (default 5m, capped by max_unlock_ttl)")
 	fmt.Fprintln(os.Stderr, "  lock                               Unload SSH key")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Operations (require unlocked key):")
