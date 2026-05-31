@@ -334,7 +334,7 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 	}
 	host, remote, local := string(args[0]), string(args[1]), string(args[2])
 	startedCh := s.startAction(transferStartAuditText(s.audit, "⬅️ get", host, remote, local))
-	if err := copyFromTarget(ctx, s.cfg, s.st, host, remote, local); err != nil {
+	if err := copyFromTargetSelector(ctx, s.cfg, s.st, host, remote, local); err != nil {
 		s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
 	}
@@ -407,7 +407,7 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 	}
 	host, local, remote := string(args[0]), string(args[1]), string(args[2])
 	startedCh := s.startAction(transferStartAuditText(s.audit, "➡️ put", host, local, remote))
-	if err := copyToTarget(ctx, s.cfg, s.st, host, local, remote); err != nil {
+	if err := copyToTargetSelector(ctx, s.cfg, s.st, host, local, remote); err != nil {
 		s.finishAction(startedCh, true, transferAuditText(s.audit, "➡️ put", host, local, remote, err.Error()))
 		return nil, err
 	}
