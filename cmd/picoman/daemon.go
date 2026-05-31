@@ -1327,7 +1327,7 @@ func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	if err := copyFromTargetSelector(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
 		return "", err
 	}
-	return transferText("⬅️ get", fields[1], fields[2], groupGetLocalDisplay(fields[1], localName)), nil
+	return transferText("⬅️ get", fields[1], fields[2], localName), nil
 }
 
 func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -1347,13 +1347,6 @@ func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 func defaultTransferName(name string) string {
 	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
 	return path.Base(clean)
-}
-
-func groupGetLocalDisplay(selector, localName string) string {
-	if strings.HasPrefix(selector, "@") {
-		return path.Join("<host>", localName)
-	}
-	return localName
 }
 
 func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, command string) (output string, exitCode int, err error) {
@@ -1497,24 +1490,7 @@ func copyFromTargetSelector(ctx context.Context, cfg *config.Config, st *agent.S
 	if !strings.HasPrefix(selector, "@") {
 		return copyFromTarget(ctx, cfg, st, selector, remoteName, localName)
 	}
-	hosts, err := hostsForGroupSelector(cfg, selector)
-	if err != nil {
-		return err
-	}
-	if !st.IsUnlocked() {
-		return errors.New("key is locked")
-	}
-	var errs []string
-	for _, host := range hosts {
-		hostLocalName := path.Join(host, localName)
-		if err := copyFromTarget(ctx, cfg, st, host, remoteName, hostLocalName); err != nil {
-			errs = append(errs, host+": "+err.Error())
-		}
-	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
+	return errors.New("get on group is not supported")
 }
 
 func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targetName, localName, remoteName string) error {

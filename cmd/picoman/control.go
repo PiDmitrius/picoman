@@ -333,13 +333,12 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 		return nil, errors.New("usage: GET <host> <remote> <local>")
 	}
 	host, remote, local := string(args[0]), string(args[1]), string(args[2])
-	localDisplay := groupGetLocalDisplay(host, local)
-	startedCh := s.startAction(transferStartAuditText(s.audit, "⬅️ get", host, remote, localDisplay))
+	startedCh := s.startAction(transferStartAuditText(s.audit, "⬅️ get", host, remote, local))
 	if err := copyFromTargetSelector(ctx, s.cfg, s.st, host, remote, local); err != nil {
-		s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, localDisplay, err.Error()))
+		s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
 	}
-	s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, localDisplay, ""))
+	s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, ""))
 	return nil, nil
 }
 

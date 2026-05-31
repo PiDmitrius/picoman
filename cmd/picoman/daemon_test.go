@@ -224,49 +224,46 @@ func TestChatLogLevelKeepsTransferErrorsMinimal(t *testing.T) {
 	}
 }
 
-func TestTransferCommandsAcceptGroupSelectors(t *testing.T) {
+func TestPutCommandAcceptsGroupSelector(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
 			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
 		},
 	}
 	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
-	for _, tt := range []struct {
-		name   string
-		fn     func(cmdCtx, []string) (cmdReply, error)
-		fields []string
-		want   string
-	}{
-		{name: "get", fn: cmdGet, fields: []string{"get", "@web", "remote", "local"}, want: actionText("⬅️ get", "@web")},
-		{name: "put", fn: cmdPut, fields: []string{"put", "@web", "local", "remote"}, want: actionText("➡️ put", "@web")},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			reply, err := tt.fn(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, tt.fields)
-			if err == nil {
-				t.Fatal("command succeeded with locked key")
-			}
-			if strings.Contains(err.Error(), "unknown target") {
-				t.Fatalf("group selector was treated as host: %v", err)
-			}
-			if reply.text != tt.want {
-				t.Fatalf("reply = %q, want %q", reply.text, tt.want)
-			}
-		})
+	reply, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"put", "@web", "local", "remote"})
+	if err == nil {
+		t.Fatal("command succeeded with locked key")
+	}
+	if strings.Contains(err.Error(), "unknown target") {
+		t.Fatalf("group selector was treated as host: %v", err)
+	}
+	if got, want := reply.text, actionText("➡️ put", "@web"); got != want {
+		t.Fatalf("reply = %q, want %q", got, want)
 	}
 }
 
-func TestTransferCommandsRejectEmptyGroupSelectors(t *testing.T) {
+func TestGetCommandRejectsGroupSelector(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
+		},
+	}
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	if _, err := cmdGet(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"get", "@web", "remote", "local"}); err == nil {
+		t.Fatal("cmdGet accepted group selector")
+	} else if !strings.Contains(err.Error(), "get on group is not supported") {
+		t.Fatalf("cmdGet error = %v, want unsupported group get", err)
+	}
+}
+
+func TestPutCommandRejectsEmptyGroupSelector(t *testing.T) {
 	cfg := &config.Config{Targets: map[string]config.Target{}}
 	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
 	if _, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"put", "@empty", "local", "remote"}); err == nil {
 		t.Fatal("cmdPut accepted empty group")
 	} else if !strings.Contains(err.Error(), `group "@empty" is empty`) {
 		t.Fatalf("cmdPut error = %v, want empty group", err)
-	}
-	if _, err := cmdGet(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"get", "@empty", "remote", "local"}); err == nil {
-		t.Fatal("cmdGet accepted empty group")
-	} else if !strings.Contains(err.Error(), `group "@empty" is empty`) {
-		t.Fatalf("cmdGet error = %v, want empty group", err)
 	}
 }
 
