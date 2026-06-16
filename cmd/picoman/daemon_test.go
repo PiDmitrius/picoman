@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -123,6 +125,186 @@ func TestBuiltinAllGroupListsEnabledHosts(t *testing.T) {
 	}
 	if got, want := groupHosts(cfg, "all"), []string{"one", "two"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("groupHosts(all) = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunGroupStartsHostsInParallelAndReportsInOrder(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
+			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
+		},
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	done := make(chan struct {
+		output string
+		code   int
+		err    error
+	}, 1)
+
+	go func() {
+		output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+			started <- host
+			<-release
+			return host + " output", 0, nil
+		})
+		done <- struct {
+			output string
+			code   int
+			err    error
+		}{output: output, code: code, err: err}
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			close(release)
+			t.Fatal("group run did not start all hosts before waiting for completion")
+		}
+	}
+	close(release)
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("runTargetSelectorWithRunner returned error: %v", got.err)
+		}
+		if got.code != 0 {
+			t.Fatalf("exit code = %d, want 0", got.code)
+		}
+		want := "== one ==\none output\n\n\n== two ==\ntwo output"
+		if got.output != want {
+			t.Fatalf("output = %q, want %q", got.output, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("group run did not finish after releasing hosts")
+	}
+}
+
+func TestRunGroupLimitsParallelHosts(t *testing.T) {
+	targets := map[string]config.Target{}
+	for i := 0; i < maxParallelGroupRuns+1; i++ {
+		name := "host" + string(rune('a'+i))
+		targets[name] = config.Target{User: "user", Host: name + ".example", Groups: []string{"web"}}
+	}
+	cfg := &config.Config{Targets: targets}
+	started := make(chan struct{}, maxParallelGroupRuns+1)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+
+	go func() {
+		_, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(context.Context, string, string) (string, int, error) {
+			started <- struct{}{}
+			<-release
+			return "", 0, nil
+		})
+		done <- err
+	}()
+
+	for i := 0; i < maxParallelGroupRuns; i++ {
+		select {
+		case <-started:
+		case <-time.After(500 * time.Millisecond):
+			close(release)
+			t.Fatalf("only %d hosts started, want concurrency cap %d", i, maxParallelGroupRuns)
+		}
+	}
+	select {
+	case <-started:
+		close(release)
+		t.Fatalf("more than %d hosts started concurrently", maxParallelGroupRuns)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runTargetSelectorWithRunner returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("group run did not finish after releasing hosts")
+	}
+}
+
+func TestRunGroupPreservesExitCodePrecedence(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
+			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
+		},
+	}
+	output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+		if host == "one" {
+			return "one failed", 3, nil
+		}
+		return "two failed", 5, nil
+	})
+	if err != nil {
+		t.Fatalf("runTargetSelectorWithRunner returned error: %v", err)
+	}
+	if code != 3 {
+		t.Fatalf("exit code = %d, want first host code 3", code)
+	}
+	if !strings.Contains(output, "exit status 3") || !strings.Contains(output, "exit status 5") {
+		t.Fatalf("output did not include both exit statuses: %q", output)
+	}
+}
+
+func TestRunGroupPreservesMixedErrorAndExitPrecedence(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
+			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
+		},
+	}
+	for _, tt := range []struct {
+		name     string
+		oneErr   error
+		oneCode  int
+		twoErr   error
+		twoCode  int
+		wantCode int
+	}{
+		{name: "exit first", oneCode: 2, twoErr: errors.New("transport failed"), wantCode: 2},
+		{name: "error first", oneErr: errors.New("transport failed"), twoCode: 2, wantCode: 255},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+				if host == "one" {
+					return "", tt.oneCode, tt.oneErr
+				}
+				return "", tt.twoCode, tt.twoErr
+			})
+			if err != nil {
+				t.Fatalf("runTargetSelectorWithRunner returned error: %v", err)
+			}
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tt.wantCode)
+			}
+			if !strings.Contains(output, "exit status 2") || !strings.Contains(output, "transport failed") {
+				t.Fatalf("output did not include mixed failure details: %q", output)
+			}
+		})
+	}
+}
+
+func TestRunGroupRejectsEmptyGroupAndLockedKey(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
+		},
+	}
+	if _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@empty", "uptime", func() bool { return true }, nil); err == nil {
+		t.Fatal("empty group succeeded")
+	} else if !strings.Contains(err.Error(), `group "@empty" is empty`) {
+		t.Fatalf("empty group error = %v", err)
+	}
+	if _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return false }, nil); err == nil {
+		t.Fatal("locked group run succeeded")
+	} else if err.Error() != "key is locked" {
+		t.Fatalf("locked group error = %v", err)
 	}
 }
 

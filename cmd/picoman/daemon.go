@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -467,6 +468,7 @@ type cmdEntry struct {
 }
 
 const builtinAllGroup = "all"
+const maxParallelGroupRuns = 16
 
 var commands = map[string]cmdEntry{
 	"start":    {fn: cmdHelp},
@@ -1358,8 +1360,20 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 }
 
 func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
+	return runTargetSelectorWithRunner(ctx, cfg, selector, command, st.IsUnlocked, func(ctx context.Context, host, command string) (string, int, error) {
+		return runTarget(ctx, cfg, st, host, command)
+	})
+}
+
+type runTargetResult struct {
+	output   string
+	exitCode int
+	err      error
+}
+
+func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, selector, command string, isUnlocked func() bool, runner func(context.Context, string, string) (string, int, error)) (output string, exitCode int, err error) {
 	if !strings.HasPrefix(selector, "@") {
-		return runTarget(ctx, cfg, st, selector, command)
+		return runner(ctx, selector, command)
 	}
 	group, err := parseGroupSelector(selector)
 	if err != nil {
@@ -1369,9 +1383,24 @@ func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State,
 	if len(hosts) == 0 {
 		return "", 0, fmt.Errorf("group %q is empty", selector)
 	}
-	if !st.IsUnlocked() {
+	if !isUnlocked() {
 		return "", 0, errors.New("key is locked")
 	}
+	results := make([]runTargetResult, len(hosts))
+	sem := make(chan struct{}, maxParallelGroupRuns)
+	var wg sync.WaitGroup
+	for i, host := range hosts {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int, host string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hostOutput, code, runErr := runner(ctx, host, command)
+			results[i] = runTargetResult{output: hostOutput, exitCode: code, err: runErr}
+		}(i, host)
+	}
+	wg.Wait()
+
 	var b strings.Builder
 	finalCode := 0
 	for i, host := range hosts {
@@ -1381,7 +1410,7 @@ func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State,
 		b.WriteString("== ")
 		b.WriteString(host)
 		b.WriteString(" ==\n")
-		hostOutput, code, runErr := runTarget(ctx, cfg, st, host, command)
+		hostOutput, code, runErr := results[i].output, results[i].exitCode, results[i].err
 		if hostOutput != "" {
 			b.WriteString(hostOutput)
 			b.WriteString("\n")
