@@ -179,10 +179,10 @@ func TestTargetExpressionsRejectBadInput(t *testing.T) {
 	} else if !strings.Contains(err.Error(), `unknown target "missing"`) {
 		t.Fatalf("error = %v, want unknown target", err)
 	}
-	if hosts, err := hostsForTargetExpr(cfg, "@missing+@web"); err != nil {
-		t.Fatalf("empty expression returned unexpected error: %v", err)
-	} else if len(hosts) != 0 {
-		t.Fatalf("empty expression hosts = %#v, want none", hosts)
+	if _, err := hostsForTargetExpr(cfg, "@all^@missing"); err == nil {
+		t.Fatal("hostsForTargetExpr accepted missing group in expression")
+	} else if !strings.Contains(err.Error(), `group "@missing" is empty`) {
+		t.Fatalf("error = %v, want empty group", err)
 	}
 }
 

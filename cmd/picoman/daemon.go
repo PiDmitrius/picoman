@@ -1726,11 +1726,11 @@ func targetSet(cfg *config.Config, selector string) (map[string]bool, error) {
 	}
 	var hosts []string
 	if strings.HasPrefix(selector, "@") {
-		group, err := parseGroupSelector(selector)
+		resolved, err := hostsForGroupSelector(cfg, selector)
 		if err != nil {
 			return nil, err
 		}
-		hosts = groupHosts(cfg, group)
+		hosts = resolved
 	} else {
 		if _, ok := cfg.Target(selector); !ok {
 			return nil, fmt.Errorf("unknown target %q", selector)

@@ -142,6 +142,7 @@ func (c *Config) SetHostRemoteWorkDir(name, remoteWorkDir string) (Target, error
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
 	t.RemoteWorkDir = remoteWorkDir
+	t.WorkDir = remoteWorkDir
 	if err := ValidateTarget(name, t); err != nil {
 		return Target{}, err
 	}

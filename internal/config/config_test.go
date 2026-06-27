@@ -97,6 +97,9 @@ func TestSetHostRemoteWorkDirPersistsAndClears(t *testing.T) {
 	if got := db.Hosts["host"].RemoteWorkDir; got != "~/deploy" {
 		t.Fatalf("saved RemoteWorkDir = %q, want ~/deploy", got)
 	}
+	if got := db.Hosts["host"].WorkDir; got != "~/deploy" {
+		t.Fatalf("saved legacy WorkDir = %q, want ~/deploy", got)
+	}
 
 	target, err = cfg.SetHostRemoteWorkDir("host", "")
 	if err != nil {
@@ -115,6 +118,9 @@ func TestSetHostRemoteWorkDirPersistsAndClears(t *testing.T) {
 	}
 	if _, ok := raw["hosts"]["host"]["remote_work_dir"]; ok {
 		t.Fatal("remote_work_dir remained in hosts.json after clearing")
+	}
+	if _, ok := raw["hosts"]["host"]["work_dir"]; ok {
+		t.Fatal("work_dir remained in hosts.json after clearing")
 	}
 }
 
