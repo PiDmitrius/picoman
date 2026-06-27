@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +129,63 @@ func TestBuiltinAllGroupListsEnabledHosts(t *testing.T) {
 	}
 }
 
+func TestTargetExpressionsResolveSets(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"alpha":   {User: "u", Host: "alpha.example", Groups: []string{"a"}},
+			"beta":    {User: "u", Host: "beta.example", Groups: []string{"a", "b"}},
+			"delta":   {User: "u", Host: "delta.example", Disabled: true},
+			"gamma":   {User: "u", Host: "gamma.example", Groups: []string{"b"}},
+			"standby": {User: "u", Host: "standby.example"},
+		},
+	}
+	for _, tt := range []struct {
+		expr string
+		want []string
+	}{
+		{expr: "@a,@b", want: []string{"alpha", "beta", "gamma"}},
+		{expr: "@a^@b", want: []string{"alpha"}},
+		{expr: "@a+@b", want: []string{"beta"}},
+		{expr: "standby,@b^gamma", want: []string{"beta", "standby"}},
+		{expr: "@all^@a", want: []string{"gamma", "standby"}},
+	} {
+		t.Run(tt.expr, func(t *testing.T) {
+			got, err := hostsForTargetExpr(cfg, tt.expr)
+			if err != nil {
+				t.Fatalf("hostsForTargetExpr returned error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("hostsForTargetExpr = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTargetExpressionsRejectBadInput(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"host": {User: "u", Host: "host.example", Groups: []string{"web"}},
+		},
+	}
+	for _, expr := range []string{",@web", "@web+", "host^"} {
+		t.Run(expr, func(t *testing.T) {
+			if _, err := hostsForTargetExpr(cfg, expr); err == nil {
+				t.Fatal("hostsForTargetExpr accepted bad expression")
+			}
+		})
+	}
+	if _, err := hostsForTargetExpr(cfg, "missing,@web"); err == nil {
+		t.Fatal("hostsForTargetExpr accepted unknown host")
+	} else if !strings.Contains(err.Error(), `unknown target "missing"`) {
+		t.Fatalf("error = %v, want unknown target", err)
+	}
+	if hosts, err := hostsForTargetExpr(cfg, "@missing+@web"); err != nil {
+		t.Fatalf("empty expression returned unexpected error: %v", err)
+	} else if len(hosts) != 0 {
+		t.Fatalf("empty expression hosts = %#v, want none", hosts)
+	}
+}
+
 func TestRunGroupStartsHostsInParallelAndReportsInOrder(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
@@ -180,6 +238,33 @@ func TestRunGroupStartsHostsInParallelAndReportsInOrder(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("group run did not finish after releasing hosts")
+	}
+}
+
+func TestRunTargetExpressionCanStartWithHost(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example"},
+			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
+		},
+	}
+	var ran []string
+	output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "one,@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+		ran = append(ran, host)
+		return host + " output", 0, nil
+	})
+	if err != nil {
+		t.Fatalf("runTargetSelectorWithRunner returned error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	sort.Strings(ran)
+	if got, want := ran, []string{"one", "two"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ran hosts = %#v, want %#v", got, want)
+	}
+	if want := "== one ==\none output\n\n\n== two ==\ntwo output"; output != want {
+		t.Fatalf("output = %q, want %q", output, want)
 	}
 }
 
@@ -421,6 +506,26 @@ func TestPutCommandAcceptsGroupSelector(t *testing.T) {
 		t.Fatalf("group selector was treated as host: %v", err)
 	}
 	if got, want := reply.text, actionText("➡️ put", "@web"); got != want {
+		t.Fatalf("reply = %q, want %q", got, want)
+	}
+}
+
+func TestPutCommandAcceptsTargetExpression(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example"},
+			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
+		},
+	}
+	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	reply, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"put", "one,@web", "local", "remote"})
+	if err == nil {
+		t.Fatal("command succeeded with locked key")
+	}
+	if strings.Contains(err.Error(), "unknown target") {
+		t.Fatalf("target expression was treated as host: %v", err)
+	}
+	if got, want := reply.text, actionText("➡️ put", "one,@web"); got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
 }

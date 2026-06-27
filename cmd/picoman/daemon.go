@@ -1372,16 +1372,15 @@ type runTargetResult struct {
 }
 
 func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, selector, command string, isUnlocked func() bool, runner func(context.Context, string, string) (string, int, error)) (output string, exitCode int, err error) {
-	if !strings.HasPrefix(selector, "@") {
+	if !isTargetExpr(selector) {
 		return runner(ctx, selector, command)
 	}
-	group, err := parseGroupSelector(selector)
+	hosts, err := hostsForTargetExpr(cfg, selector)
 	if err != nil {
 		return "", 0, err
 	}
-	hosts := groupHosts(cfg, group)
 	if len(hosts) == 0 {
-		return "", 0, fmt.Errorf("group %q is empty", selector)
+		return "", 0, fmt.Errorf("target expression %q is empty", selector)
 	}
 	if !isUnlocked() {
 		return "", 0, errors.New("key is locked")
@@ -1516,7 +1515,7 @@ func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, ta
 }
 
 func copyFromTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, remoteName, localName string) error {
-	if !strings.HasPrefix(selector, "@") {
+	if !isTargetExpr(selector) {
 		return copyFromTarget(ctx, cfg, st, selector, remoteName, localName)
 	}
 	return errors.New("get on group is not supported")
@@ -1552,12 +1551,15 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 }
 
 func copyToTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, localName, remoteName string) error {
-	if !strings.HasPrefix(selector, "@") {
+	if !isTargetExpr(selector) {
 		return copyToTarget(ctx, cfg, st, selector, localName, remoteName)
 	}
-	hosts, err := hostsForGroupSelector(cfg, selector)
+	hosts, err := hostsForTargetExpr(cfg, selector)
 	if err != nil {
 		return err
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("target expression %q is empty", selector)
 	}
 	if !st.IsUnlocked() {
 		return errors.New("key is locked")
@@ -1593,6 +1595,125 @@ func hostsForGroupSelector(cfg *config.Config, selector string) ([]string, error
 		return nil, fmt.Errorf("group %q is empty", selector)
 	}
 	return hosts, nil
+}
+
+func isTargetExpr(selector string) bool {
+	return strings.HasPrefix(selector, "@") || strings.ContainsAny(selector, ",+^")
+}
+
+func hostsForTargetExpr(cfg *config.Config, expr string) ([]string, error) {
+	if !strings.ContainsAny(expr, ",+^") {
+		if strings.HasPrefix(expr, "@") {
+			return hostsForGroupSelector(cfg, expr)
+		}
+		if _, ok := cfg.Target(expr); !ok {
+			return nil, fmt.Errorf("unknown target %q", expr)
+		}
+		return []string{expr}, nil
+	}
+
+	union := map[string]bool{}
+	for _, clause := range strings.Split(expr, ",") {
+		hosts, err := evalTargetClause(cfg, clause)
+		if err != nil {
+			return nil, err
+		}
+		for host := range hosts {
+			union[host] = true
+		}
+	}
+	return orderHosts(cfg, union), nil
+}
+
+func evalTargetClause(cfg *config.Config, clause string) (map[string]bool, error) {
+	if clause == "" {
+		return nil, fmt.Errorf("bad target expression")
+	}
+	parts, ops, err := splitTargetClause(clause)
+	if err != nil {
+		return nil, err
+	}
+	current, err := targetSet(cfg, parts[0])
+	if err != nil {
+		return nil, err
+	}
+	for i, op := range ops {
+		next, err := targetSet(cfg, parts[i+1])
+		if err != nil {
+			return nil, err
+		}
+		switch op {
+		case '+':
+			for host := range current {
+				if !next[host] {
+					delete(current, host)
+				}
+			}
+		case '^':
+			for host := range next {
+				delete(current, host)
+			}
+		}
+	}
+	return current, nil
+}
+
+func splitTargetClause(clause string) ([]string, []byte, error) {
+	var parts []string
+	var ops []byte
+	start := 0
+	for i := 0; i < len(clause); i++ {
+		switch clause[i] {
+		case '+', '^':
+			if i == start {
+				return nil, nil, fmt.Errorf("bad target expression")
+			}
+			parts = append(parts, clause[start:i])
+			ops = append(ops, clause[i])
+			start = i + 1
+		}
+	}
+	if start == len(clause) {
+		return nil, nil, fmt.Errorf("bad target expression")
+	}
+	parts = append(parts, clause[start:])
+	return parts, ops, nil
+}
+
+func targetSet(cfg *config.Config, selector string) (map[string]bool, error) {
+	if selector == "" {
+		return nil, fmt.Errorf("bad target expression")
+	}
+	var hosts []string
+	if strings.HasPrefix(selector, "@") {
+		group, err := parseGroupSelector(selector)
+		if err != nil {
+			return nil, err
+		}
+		hosts = groupHosts(cfg, group)
+	} else {
+		if _, ok := cfg.Target(selector); !ok {
+			return nil, fmt.Errorf("unknown target %q", selector)
+		}
+		hosts = []string{selector}
+	}
+	out := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		out[host] = true
+	}
+	return out, nil
+}
+
+func orderHosts(cfg *config.Config, set map[string]bool) []string {
+	targets := cfg.AllTargets()
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		if set[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func localWorkPath(cfg *config.Config, name string) (string, error) {
