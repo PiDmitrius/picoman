@@ -7,19 +7,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Target struct {
-	User      string   `json:"user"`
-	Host      string   `json:"host"`
-	Port      int      `json:"port,omitempty"`
-	PublicKey string   `json:"public_key,omitempty"`
-	WorkDir   string   `json:"work_dir,omitempty"`
-	Disabled  bool     `json:"disabled,omitempty"`
-	Note      string   `json:"note,omitempty"`
-	Groups    []string `json:"groups,omitempty"`
+	User          string   `json:"user"`
+	Host          string   `json:"host"`
+	Port          int      `json:"port,omitempty"`
+	PublicKey     string   `json:"public_key,omitempty"`
+	WorkDir       string   `json:"work_dir,omitempty"` // legacy remote work-dir override
+	RemoteWorkDir string   `json:"remote_work_dir,omitempty"`
+	Disabled      bool     `json:"disabled,omitempty"`
+	Note          string   `json:"note,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 type HostDB struct {
@@ -125,6 +127,24 @@ func (c *Config) SetHostNote(name, note string) (Target, error) {
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
 	t.Note = note
+	c.Targets[name] = t
+	if err := saveHostDBLocked(c); err != nil {
+		return Target{}, err
+	}
+	return t, nil
+}
+
+func (c *Config) SetHostRemoteWorkDir(name, remoteWorkDir string) (Target, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.Targets[name]
+	if !ok {
+		return Target{}, fmt.Errorf("unknown host %q", name)
+	}
+	t.RemoteWorkDir = remoteWorkDir
+	if err := ValidateTarget(name, t); err != nil {
+		return Target{}, err
+	}
 	c.Targets[name] = t
 	if err := saveHostDBLocked(c); err != nil {
 		return Target{}, err
@@ -454,7 +474,17 @@ func ValidateTarget(name string, target Target) error {
 			return fmt.Errorf("target %q has bad group %q", name, group)
 		}
 	}
+	if badRemoteWorkDir(target.RemoteWorkDir) {
+		return fmt.Errorf("target %q has bad remote_work_dir", name)
+	}
+	if badRemoteWorkDir(target.WorkDir) {
+		return fmt.Errorf("target %q has bad work_dir", name)
+	}
 	return nil
+}
+
+func badRemoteWorkDir(path string) bool {
+	return strings.ContainsAny(path, " \t\r\n")
 }
 
 func hasGroup(groups []string, group string) bool {

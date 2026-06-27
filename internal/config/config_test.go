@@ -70,6 +70,54 @@ func TestRemoveTargetDeletesHost(t *testing.T) {
 	}
 }
 
+func TestSetHostRemoteWorkDirPersistsAndClears(t *testing.T) {
+	hostDB := t.TempDir() + "/hosts.json"
+	cfg := &Config{
+		HostDB:  hostDB,
+		Targets: map[string]Target{},
+	}
+	if err := cfg.UpsertTarget("host", Target{User: "u", Host: "host.example"}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := cfg.SetHostRemoteWorkDir("host", "~/deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.RemoteWorkDir != "~/deploy" {
+		t.Fatalf("RemoteWorkDir = %q, want ~/deploy", target.RemoteWorkDir)
+	}
+	data, err := os.ReadFile(hostDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var db HostDB
+	if err := json.Unmarshal(data, &db); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.Hosts["host"].RemoteWorkDir; got != "~/deploy" {
+		t.Fatalf("saved RemoteWorkDir = %q, want ~/deploy", got)
+	}
+
+	target, err = cfg.SetHostRemoteWorkDir("host", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.RemoteWorkDir != "" {
+		t.Fatalf("RemoteWorkDir = %q, want empty", target.RemoteWorkDir)
+	}
+	data, err = os.ReadFile(hostDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]map[string]map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["hosts"]["host"]["remote_work_dir"]; ok {
+		t.Fatal("remote_work_dir remained in hosts.json after clearing")
+	}
+}
+
 func TestSetLogLevelPersistsConfigField(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PICOMAN_CONFIG_DIR", dir)

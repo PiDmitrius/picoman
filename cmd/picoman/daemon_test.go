@@ -554,6 +554,56 @@ func TestPutCommandRejectsEmptyGroupSelector(t *testing.T) {
 	}
 }
 
+func TestRemoteWorkPathUsesHostOverride(t *testing.T) {
+	cfg := &config.Config{RemoteWorkDir: "~/global"}
+	target := config.Target{RemoteWorkDir: "~/host"}
+	got, err := remoteWorkPath(cfg, target, "dir/file")
+	if err != nil {
+		t.Fatalf("remoteWorkPath returned error: %v", err)
+	}
+	if got != "~/host/dir/file" {
+		t.Fatalf("remoteWorkPath = %q, want host override", got)
+	}
+
+	target = config.Target{WorkDir: "~/legacy"}
+	got, err = remoteWorkPath(cfg, target, "file")
+	if err != nil {
+		t.Fatalf("remoteWorkPath returned error: %v", err)
+	}
+	if got != "~/legacy/file" {
+		t.Fatalf("remoteWorkPath = %q, want legacy override", got)
+	}
+
+	target = config.Target{}
+	got, err = remoteWorkPath(cfg, target, "file")
+	if err != nil {
+		t.Fatalf("remoteWorkPath returned error: %v", err)
+	}
+	if got != "~/global/file" {
+		t.Fatalf("remoteWorkPath = %q, want global remote work dir", got)
+	}
+
+	cfg = &config.Config{}
+	got, err = remoteWorkPath(cfg, target, "file")
+	if err != nil {
+		t.Fatalf("remoteWorkPath returned error: %v", err)
+	}
+	if got != "~/picoman/file" {
+		t.Fatalf("remoteWorkPath = %q, want default remote work dir", got)
+	}
+}
+
+func TestRemoteWorkPathRejectsEscape(t *testing.T) {
+	cfg := &config.Config{RemoteWorkDir: "~/global"}
+	for _, name := range []string{"../file", "dir/../../file", "/abs/file"} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := remoteWorkPath(cfg, config.Target{}, name); err == nil {
+				t.Fatal("remoteWorkPath accepted escaping path")
+			}
+		})
+	}
+}
+
 func TestDeveloperAutoUnlockTTLRequiresDeveloperDir(t *testing.T) {
 	cfg := &config.Config{MaxUnlockTTL: "2h"}
 	if _, ok := developerAutoUnlockTTL(cfg); ok {
@@ -614,7 +664,7 @@ func TestCmdHostRemoveCommand(t *testing.T) {
 func TestCmdHostInfoCommand(t *testing.T) {
 	cfg := &config.Config{
 		Targets: map[string]config.Target{
-			"host": {User: "user", Host: "host.example"},
+			"host": {User: "user", Host: "host.example", RemoteWorkDir: "~/deploy"},
 		},
 	}
 	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "info", "host"})
@@ -623,6 +673,42 @@ func TestCmdHostInfoCommand(t *testing.T) {
 	}
 	if reply.text == "" {
 		t.Fatal("cmdHost returned empty reply")
+	}
+	if !strings.Contains(reply.text, "remote_work_dir: ~/deploy") {
+		t.Fatalf("host info did not include remote_work_dir: %q", reply.text)
+	}
+}
+
+func TestCmdHostSetRemoteWorkDir(t *testing.T) {
+	cfg := &config.Config{
+		HostDB:  t.TempDir() + "/hosts.json",
+		Targets: map[string]config.Target{},
+	}
+	if err := cfg.UpsertTarget("host", config.Target{User: "user", Host: "host.example"}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := cmdHost(cmdCtx{cfg: cfg}, []string{"host", "set", "host", "remote_work_dir", "~/deploy"})
+	if err != nil {
+		t.Fatalf("cmdHost returned error: %v", err)
+	}
+	if !strings.Contains(reply.text, "~/deploy") {
+		t.Fatalf("reply = %q, want remote work dir", reply.text)
+	}
+	target, _ := cfg.Target("host")
+	if target.RemoteWorkDir != "~/deploy" {
+		t.Fatalf("RemoteWorkDir = %q, want ~/deploy", target.RemoteWorkDir)
+	}
+
+	reply, err = cmdHost(cmdCtx{cfg: cfg}, []string{"host", "set", "host", "remote_work_dir"})
+	if err != nil {
+		t.Fatalf("cmdHost clear returned error: %v", err)
+	}
+	if !strings.Contains(reply.text, "cleared") {
+		t.Fatalf("reply = %q, want cleared", reply.text)
+	}
+	target, _ = cfg.Target("host")
+	if target.RemoteWorkDir != "" {
+		t.Fatalf("RemoteWorkDir = %q, want empty", target.RemoteWorkDir)
 	}
 }
 

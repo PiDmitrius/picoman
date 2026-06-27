@@ -656,6 +656,12 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 			return cmdReply{html: true}, err
 		}
 		return cmdReply{text: text, html: true}, nil
+	case "set":
+		text, err := setHostField(fields[2:], c.cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
+		}
+		return cmdReply{text: text, html: true}, nil
 	case "add":
 		return hostAdd(c.cfg, fields[2:])
 	case "rm", "remove":
@@ -960,6 +966,7 @@ commands:
 /host list
 /host info <name>
 /host note <name> [note]
+/host set <name> remote_work_dir [path]
 /host add
 /host remove <name>
 /groups
@@ -1089,12 +1096,18 @@ func hostText(name string, target config.Target) string {
 		}
 		groups = "\ngroups: " + strings.Join(escaped, ", ")
 	}
+	remoteWorkDir := ""
+	if target.RemoteWorkDir != "" {
+		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.RemoteWorkDir)
+	} else if target.WorkDir != "" {
+		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.WorkDir)
+	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
 		html.EscapeString(target.User),
 		html.EscapeString(target.Host),
 		port,
-		state+note+groups,
+		state+note+groups+remoteWorkDir,
 	)
 }
 
@@ -1183,12 +1196,14 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 	}
 	existing, _ := cfg.Target(name)
 	target := config.Target{
-		User:      user,
-		Host:      host,
-		Port:      port,
-		PublicKey: publicKey,
-		Note:      existing.Note,
-		Groups:    existing.Groups,
+		User:          user,
+		Host:          host,
+		Port:          port,
+		PublicKey:     publicKey,
+		WorkDir:       existing.WorkDir,
+		RemoteWorkDir: existing.RemoteWorkDir,
+		Note:          existing.Note,
+		Groups:        existing.Groups,
 	}
 	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
@@ -1220,6 +1235,31 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 		return successText("host note cleared\n" + hostNameText(name)), nil
 	}
 	return successText("host note\n" + hostNameText(name) + "\n" + html.EscapeString(target.Note)), nil
+}
+
+func setHostField(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) < 2 || len(fields) > 3 {
+		return "", errors.New("usage: host set <name> remote_work_dir [path]")
+	}
+	name := fields[0]
+	field := fields[1]
+	value := ""
+	if len(fields) == 3 {
+		value = fields[2]
+	}
+	switch field {
+	case "remote_work_dir":
+		target, err := cfg.SetHostRemoteWorkDir(name, value)
+		if err != nil {
+			return "", err
+		}
+		if target.RemoteWorkDir == "" {
+			return successText("host remote_work_dir cleared\n" + hostNameText(name)), nil
+		}
+		return successText("host remote_work_dir\n" + hostNameText(name) + "\n" + html.EscapeString(target.RemoteWorkDir)), nil
+	default:
+		return "", errors.New("usage: host set <name> remote_work_dir [path]")
+	}
 }
 
 func removeHost(fields []string, cfg *config.Config) (string, error) {
@@ -1737,7 +1777,9 @@ func remoteWorkPath(cfg *config.Config, target config.Target, name string) (stri
 		return "", errors.New("bad remote file")
 	}
 	base := cfg.RemoteWorkDir
-	if target.WorkDir != "" {
+	if target.RemoteWorkDir != "" {
+		base = target.RemoteWorkDir
+	} else if target.WorkDir != "" {
 		base = target.WorkDir
 	}
 	if base == "" {
