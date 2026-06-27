@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.114"
+const version = "v0.1.119"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -107,6 +107,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  host add <name> <user@host:port> <keytype> <key>")
 	fmt.Fprintln(os.Stderr, "                                     Register target with pinned host key")
 	fmt.Fprintln(os.Stderr, "  host note <name> [<note>]          Set or clear free-form note")
+	fmt.Fprintln(os.Stderr, "  host set <name> remote_work_dir [<path>]")
+	fmt.Fprintln(os.Stderr, "                                     Set or clear target remote work dir")
 	fmt.Fprintln(os.Stderr, "  host remove <name>                 Remove target")
 	fmt.Fprintln(os.Stderr, "  groups                             List configured groups")
 	fmt.Fprintln(os.Stderr, "  group list                         List configured groups")

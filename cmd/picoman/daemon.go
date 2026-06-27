@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -467,6 +468,7 @@ type cmdEntry struct {
 }
 
 const builtinAllGroup = "all"
+const maxParallelGroupRuns = 16
 
 var commands = map[string]cmdEntry{
 	"start":    {fn: cmdHelp},
@@ -650,6 +652,12 @@ func cmdHost(c cmdCtx, fields []string) (cmdReply, error) {
 		return cmdHostInfo(c, fields[2:])
 	case "note":
 		text, err := setHostNote(fields[2:], c.cfg)
+		if err != nil {
+			return cmdReply{html: true}, err
+		}
+		return cmdReply{text: text, html: true}, nil
+	case "set":
+		text, err := setHostField(fields[2:], c.cfg)
 		if err != nil {
 			return cmdReply{html: true}, err
 		}
@@ -958,6 +966,7 @@ commands:
 /host list
 /host info <name>
 /host note <name> [note]
+/host set <name> remote_work_dir [path]
 /host add
 /host remove <name>
 /groups
@@ -1087,12 +1096,18 @@ func hostText(name string, target config.Target) string {
 		}
 		groups = "\ngroups: " + strings.Join(escaped, ", ")
 	}
+	remoteWorkDir := ""
+	if target.RemoteWorkDir != "" {
+		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.RemoteWorkDir)
+	} else if target.WorkDir != "" {
+		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.WorkDir)
+	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
 		html.EscapeString(target.User),
 		html.EscapeString(target.Host),
 		port,
-		state+note+groups,
+		state+note+groups+remoteWorkDir,
 	)
 }
 
@@ -1181,12 +1196,14 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 	}
 	existing, _ := cfg.Target(name)
 	target := config.Target{
-		User:      user,
-		Host:      host,
-		Port:      port,
-		PublicKey: publicKey,
-		Note:      existing.Note,
-		Groups:    existing.Groups,
+		User:          user,
+		Host:          host,
+		Port:          port,
+		PublicKey:     publicKey,
+		WorkDir:       existing.WorkDir,
+		RemoteWorkDir: existing.RemoteWorkDir,
+		Note:          existing.Note,
+		Groups:        existing.Groups,
 	}
 	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
@@ -1218,6 +1235,31 @@ func setHostNote(fields []string, cfg *config.Config) (string, error) {
 		return successText("host note cleared\n" + hostNameText(name)), nil
 	}
 	return successText("host note\n" + hostNameText(name) + "\n" + html.EscapeString(target.Note)), nil
+}
+
+func setHostField(fields []string, cfg *config.Config) (string, error) {
+	if len(fields) < 2 || len(fields) > 3 {
+		return "", errors.New("usage: host set <name> remote_work_dir [path]")
+	}
+	name := fields[0]
+	field := fields[1]
+	value := ""
+	if len(fields) == 3 {
+		value = fields[2]
+	}
+	switch field {
+	case "remote_work_dir":
+		target, err := cfg.SetHostRemoteWorkDir(name, value)
+		if err != nil {
+			return "", err
+		}
+		if target.RemoteWorkDir == "" {
+			return successText("host remote_work_dir cleared\n" + hostNameText(name)), nil
+		}
+		return successText("host remote_work_dir\n" + hostNameText(name) + "\n" + html.EscapeString(target.RemoteWorkDir)), nil
+	default:
+		return "", errors.New("usage: host set <name> remote_work_dir [path]")
+	}
 }
 
 func removeHost(fields []string, cfg *config.Config) (string, error) {
@@ -1358,20 +1400,46 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 }
 
 func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
-	if !strings.HasPrefix(selector, "@") {
-		return runTarget(ctx, cfg, st, selector, command)
+	return runTargetSelectorWithRunner(ctx, cfg, selector, command, st.IsUnlocked, func(ctx context.Context, host, command string) (string, int, error) {
+		return runTarget(ctx, cfg, st, host, command)
+	})
+}
+
+type runTargetResult struct {
+	output   string
+	exitCode int
+	err      error
+}
+
+func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, selector, command string, isUnlocked func() bool, runner func(context.Context, string, string) (string, int, error)) (output string, exitCode int, err error) {
+	if !isTargetExpr(selector) {
+		return runner(ctx, selector, command)
 	}
-	group, err := parseGroupSelector(selector)
+	hosts, err := hostsForTargetExpr(cfg, selector)
 	if err != nil {
 		return "", 0, err
 	}
-	hosts := groupHosts(cfg, group)
 	if len(hosts) == 0 {
-		return "", 0, fmt.Errorf("group %q is empty", selector)
+		return "", 0, fmt.Errorf("target expression %q is empty", selector)
 	}
-	if !st.IsUnlocked() {
+	if !isUnlocked() {
 		return "", 0, errors.New("key is locked")
 	}
+	results := make([]runTargetResult, len(hosts))
+	sem := make(chan struct{}, maxParallelGroupRuns)
+	var wg sync.WaitGroup
+	for i, host := range hosts {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int, host string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			hostOutput, code, runErr := runner(ctx, host, command)
+			results[i] = runTargetResult{output: hostOutput, exitCode: code, err: runErr}
+		}(i, host)
+	}
+	wg.Wait()
+
 	var b strings.Builder
 	finalCode := 0
 	for i, host := range hosts {
@@ -1381,7 +1449,7 @@ func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State,
 		b.WriteString("== ")
 		b.WriteString(host)
 		b.WriteString(" ==\n")
-		hostOutput, code, runErr := runTarget(ctx, cfg, st, host, command)
+		hostOutput, code, runErr := results[i].output, results[i].exitCode, results[i].err
 		if hostOutput != "" {
 			b.WriteString(hostOutput)
 			b.WriteString("\n")
@@ -1487,7 +1555,7 @@ func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, ta
 }
 
 func copyFromTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, remoteName, localName string) error {
-	if !strings.HasPrefix(selector, "@") {
+	if !isTargetExpr(selector) {
 		return copyFromTarget(ctx, cfg, st, selector, remoteName, localName)
 	}
 	return errors.New("get on group is not supported")
@@ -1523,12 +1591,15 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 }
 
 func copyToTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, localName, remoteName string) error {
-	if !strings.HasPrefix(selector, "@") {
+	if !isTargetExpr(selector) {
 		return copyToTarget(ctx, cfg, st, selector, localName, remoteName)
 	}
-	hosts, err := hostsForGroupSelector(cfg, selector)
+	hosts, err := hostsForTargetExpr(cfg, selector)
 	if err != nil {
 		return err
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("target expression %q is empty", selector)
 	}
 	if !st.IsUnlocked() {
 		return errors.New("key is locked")
@@ -1566,6 +1637,125 @@ func hostsForGroupSelector(cfg *config.Config, selector string) ([]string, error
 	return hosts, nil
 }
 
+func isTargetExpr(selector string) bool {
+	return strings.HasPrefix(selector, "@") || strings.ContainsAny(selector, ",+^")
+}
+
+func hostsForTargetExpr(cfg *config.Config, expr string) ([]string, error) {
+	if !strings.ContainsAny(expr, ",+^") {
+		if strings.HasPrefix(expr, "@") {
+			return hostsForGroupSelector(cfg, expr)
+		}
+		if _, ok := cfg.Target(expr); !ok {
+			return nil, fmt.Errorf("unknown target %q", expr)
+		}
+		return []string{expr}, nil
+	}
+
+	union := map[string]bool{}
+	for _, clause := range strings.Split(expr, ",") {
+		hosts, err := evalTargetClause(cfg, clause)
+		if err != nil {
+			return nil, err
+		}
+		for host := range hosts {
+			union[host] = true
+		}
+	}
+	return orderHosts(cfg, union), nil
+}
+
+func evalTargetClause(cfg *config.Config, clause string) (map[string]bool, error) {
+	if clause == "" {
+		return nil, fmt.Errorf("bad target expression")
+	}
+	parts, ops, err := splitTargetClause(clause)
+	if err != nil {
+		return nil, err
+	}
+	current, err := targetSet(cfg, parts[0])
+	if err != nil {
+		return nil, err
+	}
+	for i, op := range ops {
+		next, err := targetSet(cfg, parts[i+1])
+		if err != nil {
+			return nil, err
+		}
+		switch op {
+		case '+':
+			for host := range current {
+				if !next[host] {
+					delete(current, host)
+				}
+			}
+		case '^':
+			for host := range next {
+				delete(current, host)
+			}
+		}
+	}
+	return current, nil
+}
+
+func splitTargetClause(clause string) ([]string, []byte, error) {
+	var parts []string
+	var ops []byte
+	start := 0
+	for i := 0; i < len(clause); i++ {
+		switch clause[i] {
+		case '+', '^':
+			if i == start {
+				return nil, nil, fmt.Errorf("bad target expression")
+			}
+			parts = append(parts, clause[start:i])
+			ops = append(ops, clause[i])
+			start = i + 1
+		}
+	}
+	if start == len(clause) {
+		return nil, nil, fmt.Errorf("bad target expression")
+	}
+	parts = append(parts, clause[start:])
+	return parts, ops, nil
+}
+
+func targetSet(cfg *config.Config, selector string) (map[string]bool, error) {
+	if selector == "" {
+		return nil, fmt.Errorf("bad target expression")
+	}
+	var hosts []string
+	if strings.HasPrefix(selector, "@") {
+		resolved, err := hostsForGroupSelector(cfg, selector)
+		if err != nil {
+			return nil, err
+		}
+		hosts = resolved
+	} else {
+		if _, ok := cfg.Target(selector); !ok {
+			return nil, fmt.Errorf("unknown target %q", selector)
+		}
+		hosts = []string{selector}
+	}
+	out := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		out[host] = true
+	}
+	return out, nil
+}
+
+func orderHosts(cfg *config.Config, set map[string]bool) []string {
+	targets := cfg.AllTargets()
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		if set[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func localWorkPath(cfg *config.Config, name string) (string, error) {
 	if badWorkName(name) || filepath.IsAbs(name) {
 		return "", errors.New("bad local file")
@@ -1587,7 +1777,9 @@ func remoteWorkPath(cfg *config.Config, target config.Target, name string) (stri
 		return "", errors.New("bad remote file")
 	}
 	base := cfg.RemoteWorkDir
-	if target.WorkDir != "" {
+	if target.RemoteWorkDir != "" {
+		base = target.RemoteWorkDir
+	} else if target.WorkDir != "" {
 		base = target.WorkDir
 	}
 	if base == "" {

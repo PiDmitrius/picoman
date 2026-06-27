@@ -55,6 +55,7 @@ func (s *controlServer) handlers() map[string]controlHandler {
 		"PUT":       s.put,
 		"HOST_ADD":  bind(s.hostAdd),
 		"HOST_NOTE": bind(s.hostNote),
+		"HOST_SET":  bind(s.hostSet),
 		"HOST_RM":   bind(s.hostRemove),
 		"GROUP_ADD": bind(s.groupAdd),
 		"GROUP_RM":  bind(s.groupRemove),
@@ -368,6 +369,20 @@ func (s *controlServer) hostNote(args [][]byte) ([][]byte, error) {
 	return nil, nil
 }
 
+func (s *controlServer) hostSet(args [][]byte) ([][]byte, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, errors.New("usage: HOST_SET <name> remote_work_dir [path]")
+	}
+	fields := []string{string(args[0]), string(args[1])}
+	if len(args) == 3 {
+		fields = append(fields, string(args[2]))
+	}
+	if _, err := setHostField(fields, s.cfg); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 func (s *controlServer) hostRemove(args [][]byte) ([][]byte, error) {
 	if len(args) != 1 {
 		return nil, errors.New("usage: HOST_RM <name>")
@@ -577,6 +592,8 @@ func runHost(args []string) {
 		runHostAdd(args[1:])
 	case "note":
 		runHostNote(args[1:])
+	case "set":
+		runHostSet(args[1:])
 	case "rm", "remove":
 		runHostRemove(args[1:])
 	default:
@@ -592,6 +609,7 @@ func hostCommandsHelp() string {
 		"  host info <name>",
 		"  host add [<name> [<user>@<host>:<port> <keytype> <key>]]",
 		"  host note <name> [note]",
+		"  host set <name> remote_work_dir [path]",
 		"  host remove <name>",
 	}, "\n")
 }
@@ -659,6 +677,11 @@ func runHostInfo(name string) {
 	if len(t.Groups) > 0 {
 		fmt.Println("groups: " + strings.Join(t.Groups, ", "))
 	}
+	if t.RemoteWorkDir != "" {
+		fmt.Println("remote_work_dir: " + t.RemoteWorkDir)
+	} else if t.WorkDir != "" {
+		fmt.Println("remote_work_dir: " + t.WorkDir)
+	}
 }
 
 func runHostAdd(args []string) {
@@ -695,6 +718,24 @@ func runHostNote(args []string) {
 		os.Exit(1)
 	}
 	simpleControl("HOST_NOTE", args[0], strings.Join(args[1:], " "))
+}
+
+func runHostSet(args []string) {
+	if len(args) < 2 || len(args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: picoman host set <name> remote_work_dir [path]")
+		os.Exit(1)
+	}
+	switch args[1] {
+	case "remote_work_dir":
+		value := ""
+		if len(args) == 3 {
+			value = args[2]
+		}
+		simpleControl("HOST_SET", args[0], args[1], value)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: picoman host set <name> remote_work_dir [path]")
+		os.Exit(1)
+	}
 }
 
 func runHostRemove(args []string) {
