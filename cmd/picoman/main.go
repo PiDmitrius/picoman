@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "v0.1.119"
+const version = "v0.1.120"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -112,7 +112,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  host remove <name>                 Remove target")
 	fmt.Fprintln(os.Stderr, "  groups                             List configured groups")
 	fmt.Fprintln(os.Stderr, "  group list                         List configured groups")
-	fmt.Fprintln(os.Stderr, "  group info @<group>                Show group hosts")
+	fmt.Fprintln(os.Stderr, "  group info <target-expression>     Show resolved hosts")
 	fmt.Fprintln(os.Stderr, "  group add @<group> <host>          Add host to group")
 	fmt.Fprintln(os.Stderr, "  group remove @<group> <host>       Remove host from group")
 	fmt.Fprintln(os.Stderr)

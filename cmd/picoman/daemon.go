@@ -716,13 +716,13 @@ func cmdGroup(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdGroupInfo(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) != 1 {
-		return cmdReply{}, errors.New("usage: group info @<group>")
+		return cmdReply{}, errors.New("usage: group info <target-expression>")
 	}
-	group, err := parseGroupSelector(fields[0])
+	text, err := groupInfoText(c.cfg, fields[0], true)
 	if err != nil {
 		return cmdReply{}, err
 	}
-	return cmdReply{text: infoText(groupText(c.cfg, group)), html: true}, nil
+	return cmdReply{text: infoText(text), html: true}, nil
 }
 
 func cmdGroupModify(c cmdCtx, action string, fields []string) (cmdReply, error) {
@@ -971,7 +971,7 @@ commands:
 /host remove <name>
 /groups
 /group list
-/group info @<group>
+/group info <target-expression>
 /group add @<group> <host>
 /group remove @<group> <host>
 /run <target> <command>
@@ -1131,6 +1131,51 @@ func groupText(cfg *config.Config, group string) string {
 	lines := []string{"group @" + html.EscapeString(group)}
 	for _, name := range names {
 		lines = append(lines, "- "+hostNameText(name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func groupInfoText(cfg *config.Config, selector string, htmlOutput bool) (string, error) {
+	if strings.HasPrefix(selector, "@") && !strings.ContainsAny(selector, ",+^") {
+		group, err := parseGroupSelector(selector)
+		if err != nil {
+			return "", err
+		}
+		if htmlOutput {
+			return groupText(cfg, group), nil
+		}
+		return plainGroupText(cfg, group), nil
+	}
+	names, err := hostsForTargetExpr(cfg, selector)
+	if err != nil {
+		return "", err
+	}
+	header := "group expression " + selector
+	if htmlOutput {
+		header = "group expression " + html.EscapeString(selector)
+	}
+	if len(names) == 0 {
+		return header + " empty", nil
+	}
+	lines := []string{header}
+	for _, name := range names {
+		if htmlOutput {
+			lines = append(lines, "- "+hostNameText(name))
+		} else {
+			lines = append(lines, "- "+name)
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func plainGroupText(cfg *config.Config, group string) string {
+	names := groupHosts(cfg, group)
+	if len(names) == 0 {
+		return "group @" + group + " empty"
+	}
+	lines := []string{"group @" + group}
+	for _, name := range names {
+		lines = append(lines, "- "+name)
 	}
 	return strings.Join(lines, "\n")
 }

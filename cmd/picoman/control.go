@@ -762,15 +762,10 @@ func runGroup(args []string) {
 	switch args[0] {
 	case "info":
 		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: picoman group info @<group>")
+			fmt.Fprintln(os.Stderr, "usage: picoman group info <target-expression>")
 			os.Exit(1)
 		}
-		group, err := parseGroupSelector(args[1])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		runGroupShow(group)
+		runGroupShow(args[1])
 		return
 	case "add":
 		runGroupModify("add", args[1:])
@@ -787,7 +782,7 @@ func groupCommandsHelp() string {
 	return strings.Join([]string{
 		"group commands:",
 		"  group list",
-		"  group info @<group>",
+		"  group info <target-expression>",
 		"  group add @<group> <host>",
 		"  group remove @<group> <host>",
 	}, "\n")
@@ -841,17 +836,14 @@ func runGroupList() {
 	}
 }
 
-func runGroupShow(group string) {
+func runGroupShow(selector string) {
 	cfg := loadHosts()
-	names := groupHosts(cfg, group)
-	if len(names) == 0 {
-		fmt.Println("group @" + group + " empty")
-		return
+	text, err := groupInfoText(cfg, selector, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	fmt.Println("group @" + group)
-	for _, name := range names {
-		fmt.Println("- " + name)
-	}
+	fmt.Println(text)
 }
 
 func runAskpass() {

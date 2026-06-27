@@ -768,6 +768,56 @@ func TestCmdGroupInfoCommand(t *testing.T) {
 	}
 }
 
+func TestCmdGroupInfoAcceptsTargetExpression(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one":   {User: "user", Host: "one.example", Groups: []string{"web"}},
+			"two":   {User: "user", Host: "two.example", Groups: []string{"web", "prod"}},
+			"three": {User: "user", Host: "three.example", Groups: []string{"prod"}},
+		},
+	}
+	reply, err := cmdGroup(cmdCtx{cfg: cfg}, []string{"group", "info", "one,@prod^three"})
+	if err != nil {
+		t.Fatalf("cmdGroup returned error: %v", err)
+	}
+	if !strings.Contains(reply.text, "group expression one,@prod^three") {
+		t.Fatalf("reply = %q, want expression header", reply.text)
+	}
+	if !containsAny(reply.text, "<b>one</b>") || !containsAny(reply.text, "<b>two</b>") {
+		t.Fatalf("reply = %q, want resolved hosts", reply.text)
+	}
+	if strings.Contains(reply.text, "<b>three</b>") {
+		t.Fatalf("reply = %q, excluded host present", reply.text)
+	}
+
+	plain, err := groupInfoText(cfg, "@web+@prod", false)
+	if err != nil {
+		t.Fatalf("groupInfoText returned error: %v", err)
+	}
+	if plain != "group expression @web+@prod\n- two" {
+		t.Fatalf("plain group info = %q, want resolved expression", plain)
+	}
+}
+
+func TestGroupInfoExpressionShowsEmptyIntersection(t *testing.T) {
+	cfg := &config.Config{
+		Targets: map[string]config.Target{
+			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
+			"two": {User: "user", Host: "two.example", Groups: []string{"prod"}},
+		},
+	}
+	text, err := groupInfoText(cfg, "@web+@prod", false)
+	if err != nil {
+		t.Fatalf("groupInfoText returned error: %v", err)
+	}
+	if text != "group expression @web+@prod empty" {
+		t.Fatalf("group info = %q, want empty expression", text)
+	}
+	if _, err := groupInfoText(cfg, "@web^@missing", false); err == nil {
+		t.Fatal("groupInfoText accepted missing group in expression")
+	}
+}
+
 func TestCmdGroupRejectsObjectAction(t *testing.T) {
 	cfg := &config.Config{
 		HostDB: t.TempDir() + "/hosts.json",
