@@ -1099,8 +1099,6 @@ func hostText(name string, target config.Target) string {
 	remoteWorkDir := ""
 	if target.RemoteWorkDir != "" {
 		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.RemoteWorkDir)
-	} else if target.WorkDir != "" {
-		remoteWorkDir = "\nremote_work_dir: " + html.EscapeString(target.WorkDir)
 	}
 	return fmt.Sprintf("%s\n%s@%s:%d%s",
 		hostNameText(name),
@@ -1245,7 +1243,6 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 		Host:          host,
 		Port:          port,
 		PublicKey:     publicKey,
-		WorkDir:       existing.WorkDir,
 		RemoteWorkDir: existing.RemoteWorkDir,
 		Note:          existing.Note,
 		Groups:        existing.Groups,
@@ -1806,8 +1803,6 @@ func remoteWorkPath(cfg *config.Config, target config.Target, name string) (stri
 	base := cfg.RemoteWorkDir
 	if target.RemoteWorkDir != "" {
 		base = target.RemoteWorkDir
-	} else if target.WorkDir != "" {
-		base = target.WorkDir
 	}
 	if base == "" {
 		base = "~/picoman"

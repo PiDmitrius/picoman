@@ -17,7 +17,6 @@ type Target struct {
 	Host          string   `json:"host"`
 	Port          int      `json:"port,omitempty"`
 	PublicKey     string   `json:"public_key,omitempty"`
-	WorkDir       string   `json:"work_dir,omitempty"` // legacy remote work-dir override
 	RemoteWorkDir string   `json:"remote_work_dir,omitempty"`
 	Disabled      bool     `json:"disabled,omitempty"`
 	Note          string   `json:"note,omitempty"`
@@ -142,7 +141,6 @@ func (c *Config) SetHostRemoteWorkDir(name, remoteWorkDir string) (Target, error
 		return Target{}, fmt.Errorf("unknown host %q", name)
 	}
 	t.RemoteWorkDir = remoteWorkDir
-	t.WorkDir = remoteWorkDir
 	if err := ValidateTarget(name, t); err != nil {
 		return Target{}, err
 	}
@@ -477,9 +475,6 @@ func ValidateTarget(name string, target Target) error {
 	}
 	if badRemoteWorkDir(target.RemoteWorkDir) {
 		return fmt.Errorf("target %q has bad remote_work_dir", name)
-	}
-	if badRemoteWorkDir(target.WorkDir) {
-		return fmt.Errorf("target %q has bad work_dir", name)
 	}
 	return nil
 }
