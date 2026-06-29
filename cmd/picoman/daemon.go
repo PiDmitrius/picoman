@@ -1379,16 +1379,6 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func remoteShellQuote(s string) string {
-	if s == "~" {
-		return "~"
-	}
-	if strings.HasPrefix(s, "~/") {
-		return "~/" + shellQuote(strings.TrimPrefix(s, "~/"))
-	}
-	return shellQuote(s)
-}
-
 // handleRun returns combined remote output, command, target, and exit code.
 // err is non-nil only for transport-level failures (target unknown, key
 // locked, ssh couldn't run). A remote non-zero exit is not an error — it's
@@ -1623,14 +1613,6 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 	remotePath, err := remoteWorkPath(cfg, t, remoteName)
 	if err != nil {
 		return err
-	}
-	remoteDir := path.Dir(remotePath)
-	mkOut, code, err := runSSH(ctx, st.Socket(), t, "mkdir -p "+remoteShellQuote(remoteDir))
-	if err != nil {
-		return err
-	}
-	if code != 0 {
-		return fmt.Errorf("mkdir -p: exit status %d: %s", code, strings.TrimSpace(mkOut))
 	}
 	return runSCP(ctx, st.Socket(), t, localPath, remoteSpec(t, remotePath))
 }
