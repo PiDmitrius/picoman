@@ -97,9 +97,6 @@ func TestSetHostRemoteWorkDirPersistsAndClears(t *testing.T) {
 	if got := db.Hosts["host"].RemoteWorkDir; got != "~/deploy" {
 		t.Fatalf("saved RemoteWorkDir = %q, want ~/deploy", got)
 	}
-	if got := db.Hosts["host"].WorkDir; got != "~/deploy" {
-		t.Fatalf("saved legacy WorkDir = %q, want ~/deploy", got)
-	}
 
 	target, err = cfg.SetHostRemoteWorkDir("host", "")
 	if err != nil {
@@ -119,8 +116,32 @@ func TestSetHostRemoteWorkDirPersistsAndClears(t *testing.T) {
 	if _, ok := raw["hosts"]["host"]["remote_work_dir"]; ok {
 		t.Fatal("remote_work_dir remained in hosts.json after clearing")
 	}
-	if _, ok := raw["hosts"]["host"]["work_dir"]; ok {
-		t.Fatal("work_dir remained in hosts.json after clearing")
+}
+
+func TestLoadHostDBIgnoresPerHostWorkDir(t *testing.T) {
+	hostDB := t.TempDir() + "/hosts.json"
+	if err := os.WriteFile(hostDB, []byte(`{
+  "hosts": {
+    "host": {
+      "user": "u",
+      "host": "host.example",
+      "work_dir": "~/ignored"
+    }
+  }
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{HostDB: hostDB}
+	if err := LoadHostDB(cfg); err != nil {
+		t.Fatal(err)
+	}
+	target, ok := cfg.Target("host")
+	if !ok {
+		t.Fatal("missing target")
+	}
+	if target.RemoteWorkDir != "" {
+		t.Fatalf("RemoteWorkDir = %q, want empty", target.RemoteWorkDir)
 	}
 }
 

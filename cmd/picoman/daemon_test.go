@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,8 +250,11 @@ func TestRunTargetExpressionCanStartWithHost(t *testing.T) {
 		},
 	}
 	var ran []string
+	var ranMu sync.Mutex
 	output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "one,@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+		ranMu.Lock()
 		ran = append(ran, host)
+		ranMu.Unlock()
 		return host + " output", 0, nil
 	})
 	if err != nil {
@@ -563,15 +567,6 @@ func TestRemoteWorkPathUsesHostOverride(t *testing.T) {
 	}
 	if got != "~/host/dir/file" {
 		t.Fatalf("remoteWorkPath = %q, want host override", got)
-	}
-
-	target = config.Target{WorkDir: "~/legacy"}
-	got, err = remoteWorkPath(cfg, target, "file")
-	if err != nil {
-		t.Fatalf("remoteWorkPath returned error: %v", err)
-	}
-	if got != "~/legacy/file" {
-		t.Fatalf("remoteWorkPath = %q, want legacy override", got)
 	}
 
 	target = config.Target{}

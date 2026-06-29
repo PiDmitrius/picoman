@@ -679,8 +679,6 @@ func runHostInfo(name string) {
 	}
 	if t.RemoteWorkDir != "" {
 		fmt.Println("remote_work_dir: " + t.RemoteWorkDir)
-	} else if t.WorkDir != "" {
-		fmt.Println("remote_work_dir: " + t.WorkDir)
 	}
 }
 
