@@ -49,22 +49,12 @@ func runDaemon() {
 		log.Fatalf("create work dir: %v", err)
 	}
 
-	// Non-fatal startup issues: log now, report through outbox once it's open.
-	var startupWarnings []string
-	if err := writeKnownHosts(cfg); err != nil {
-		log.Printf("write known_hosts: %v", err)
-		startupWarnings = append(startupWarnings, "write known_hosts: "+err.Error())
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	st := agent.New(cfg.AgentSocket, cfg.KeyPath, config.MaxTTL(cfg))
-	cleanup := st.CleanStart()
-	if err := st.PrepareAskpass(); err != nil {
-		log.Printf("prepare askpass: %v", err)
-		startupWarnings = append(startupWarnings, "prepare askpass: "+err.Error())
-	}
+	st := agent.New(cfg.KeyPath, config.MaxTTL(cfg))
+	st.CleanStart()
+	cleanup := agent.CleanLegacy(cfg.LegacyAgentSocket)
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
 		criticalNotifyUsers(cfg, bot, "outbox", err)
@@ -93,9 +83,6 @@ func runDaemon() {
 		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
 	} else {
 		notify(out, cfg, bot, false, infoText(lifecycleText("started", cleanup)))
-	}
-	for _, w := range startupWarnings {
-		notify(out, cfg, bot, false, errorText(w))
 	}
 
 	// Auto-unseal in a goroutine so startup is not blocked on a potentially
@@ -1250,9 +1237,6 @@ func addHostFromFields(fields []string, cfg *config.Config) (string, error) {
 	if err := cfg.UpsertTarget(name, target); err != nil {
 		return "", err
 	}
-	if err := writeKnownHosts(cfg); err != nil {
-		return "", fmt.Errorf("write known_hosts: %w", err)
-	}
 	fp, _ := publicKeyFingerprint(publicKey)
 	return successText("host added\n" +
 		hostNameText(name) + "\n" +
@@ -1311,9 +1295,6 @@ func removeHost(fields []string, cfg *config.Config) (string, error) {
 	name := fields[0]
 	if err := cfg.RemoveTarget(name); err != nil {
 		return "", err
-	}
-	if err := writeKnownHosts(cfg); err != nil {
-		return "", fmt.Errorf("write known_hosts: %w", err)
 	}
 	return successText("host removed\n" + hostNameText(name)), nil
 }
@@ -1428,7 +1409,7 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 	if err != nil {
 		return "", 0, err
 	}
-	return runSSH(ctx, st.Socket(), t, command)
+	return runSSH(ctx, cfg, st, t, command)
 }
 
 func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
@@ -1520,53 +1501,6 @@ func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Targ
 	return t, nil
 }
 
-// writeKnownHosts rewrites the pinned-host-keys file atomically from the
-// current target set. Called at startup and after host-DB mutations, not on
-// every transfer. Removes the file when no targets carry a pinned key so
-// sshCommonOpts cleanly falls through to accept-new.
-func writeKnownHosts(cfg *config.Config) error {
-	var lines []string
-	for _, target := range cfg.AllTargets() {
-		key := strings.TrimSpace(target.PublicKey)
-		if key == "" || target.Disabled {
-			continue
-		}
-		host := target.Host
-		if target.Port != 0 && target.Port != 22 {
-			host = fmt.Sprintf("[%s]:%d", target.Host, target.Port)
-		}
-		lines = append(lines, host+" "+key)
-	}
-	path := config.KnownHostsPath()
-	if len(lines) == 0 {
-		_ = os.Remove(path)
-		return nil
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".known_hosts-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, path)
-}
-
 func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, targetName, remoteName, localName string) error {
 	t, err := targetForSSH(cfg, st, targetName)
 	if err != nil {
@@ -1583,7 +1517,7 @@ func copyFromTarget(ctx context.Context, cfg *config.Config, st *agent.State, ta
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o700); err != nil {
 		return err
 	}
-	return runSCP(ctx, st.Socket(), t, remoteSpec(t, remotePath), localPath)
+	return getSFTP(ctx, cfg, st, t, remotePath, localPath)
 }
 
 func copyFromTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, remoteName, localName string) error {
@@ -1611,7 +1545,7 @@ func copyToTarget(ctx context.Context, cfg *config.Config, st *agent.State, targ
 	if err != nil {
 		return err
 	}
-	return runSCP(ctx, st.Socket(), t, localPath, remoteSpec(t, remotePath))
+	return putSFTP(ctx, cfg, st, t, localPath, remotePath)
 }
 
 func copyToTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, localName, remoteName string) error {
@@ -1825,89 +1759,6 @@ func badWorkName(name string) bool {
 		return true
 	}
 	return strings.ContainsAny(name, " \t*?[]{}\r\n")
-}
-
-func remoteSpec(t config.Target, remotePath string) string {
-	return t.User + "@" + t.Host + ":" + remotePath
-}
-
-func runSCP(ctx context.Context, agentSocket string, t config.Target, from string, to string) error {
-	args := scpArgs(t)
-	args = append(args, "--", from, to)
-	cmd := exec.CommandContext(ctx, "scp", args...)
-	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSocket)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("scp: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
-// runSSH returns the combined remote output, the exit code, and an error.
-// Remote stdout and stderr are captured into a single buffer so callers see
-// them in arrival order (Go's exec package serializes writes when Stdout and
-// Stderr point at the same writer). Trailing newlines are trimmed.
-//
-// err is non-nil only when ssh itself failed to run (e.g. couldn't be
-// started). When ssh ran to completion the exit code is whatever ssh
-// reported — per `man ssh` that's the remote command's exit code, or 255 if
-// ssh hit a network/auth/protocol problem of its own.
-func runSSH(ctx context.Context, agentSocket string, t config.Target, remoteCommand string) (output string, exitCode int, err error) {
-	args := sshArgs(t)
-	args = append(args,
-		"--",
-		t.User+"@"+t.Host,
-		remoteCommand,
-	)
-
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSocket)
-
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	runErr := cmd.Run()
-	output = strings.TrimRight(buf.String(), "\n")
-	if runErr == nil {
-		return output, 0, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		return output, exitErr.ExitCode(), nil
-	}
-	return output, 0, fmt.Errorf("ssh: %w", runErr)
-}
-
-// sshCommonOpts builds the options shared by ssh and scp. The pinned-host-key
-// file is maintained by writeKnownHosts at startup and on host-DB changes —
-// here we just point ssh at it (when the target carries a public key).
-// Port flag differs (-p for ssh, -P for scp), so callers add it.
-func sshCommonOpts(t config.Target) []string {
-	args := []string{
-		"-F", "/dev/null",
-		"-o", "BatchMode=yes",
-		"-o", "IdentitiesOnly=no",
-	}
-	if strings.TrimSpace(t.PublicKey) != "" {
-		args = append(args,
-			"-o", "UserKnownHostsFile="+config.KnownHostsPath(),
-			"-o", "StrictHostKeyChecking=yes",
-		)
-	} else {
-		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
-	}
-	return args
-}
-
-func sshArgs(t config.Target) []string {
-	return append(sshCommonOpts(t), "-p", fmt.Sprint(targetPort(t)))
-}
-
-func scpArgs(t config.Target) []string {
-	return append(sshCommonOpts(t), "-P", fmt.Sprint(targetPort(t)))
 }
 
 func targetPort(t config.Target) int {

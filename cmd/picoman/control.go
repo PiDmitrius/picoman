@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"picoman/internal/agent"
@@ -27,9 +26,7 @@ import (
 //	Response: OK [<b64-data>]\n  |  ERR <reason>\n
 //
 // All textual arguments are base64-encoded so the parser can tokenize on
-// spaces without worrying about embedded whitespace or newlines. ASKPASS is
-// the single exception: it speaks the ssh-add askpass format (raw passphrase
-// line or empty line) and is dispatched before the protocol parser.
+// spaces without worrying about embedded whitespace or newlines.
 
 type controlServer struct {
 	cfg   *config.Config
@@ -105,10 +102,6 @@ func (s *controlServer) handle(ctx context.Context, conn net.Conn) {
 		writeErr(conn, parseErr)
 		return
 	}
-	if verb == "ASKPASS" {
-		s.handleAskpass(conn)
-		return
-	}
 	h, ok := s.handlers()[verb]
 	if !ok {
 		writeErr(conn, errors.New("unknown command"))
@@ -128,9 +121,6 @@ func parseControlRequest(line string) (string, [][]byte, error) {
 	}
 	parts := strings.Split(line, " ")
 	verb := parts[0]
-	if verb == "ASKPASS" {
-		return verb, nil, nil
-	}
 	args := make([][]byte, 0, len(parts)-1)
 	for _, p := range parts[1:] {
 		data, err := base64.StdEncoding.DecodeString(p)
@@ -156,104 +146,6 @@ func writeOK(conn net.Conn, data [][]byte) {
 
 func writeErr(conn net.Conn, err error) {
 	_, _ = io.WriteString(conn, "ERR "+err.Error()+"\n")
-}
-
-// handleAskpass speaks the raw ssh-askpass format. To avoid handing the
-// passphrase to arbitrary same-user processes, only descendants of the
-// running daemon get a real answer; everyone else sees the sealed-style
-// empty line. Legit caller chain is: askpass-symlink → ssh-add → daemon.
-func (s *controlServer) handleAskpass(conn net.Conn) {
-	if !s.askpassCallerTrusted(conn) {
-		_, _ = io.WriteString(conn, "\n")
-		return
-	}
-	passphrase := s.st.Passphrase()
-	if passphrase == "" {
-		_, _ = io.WriteString(conn, "\n")
-		return
-	}
-	_, _ = io.WriteString(conn, passphrase+"\n")
-}
-
-func (s *controlServer) askpassCallerTrusted(conn net.Conn) bool {
-	uc, ok := conn.(*net.UnixConn)
-	if !ok {
-		return false
-	}
-	peer, err := peerPID(uc)
-	if err != nil {
-		log.Printf("askpass peer pid: %v", err)
-		return false
-	}
-	daemon := os.Getpid()
-	if peer == daemon {
-		return false // we never call ourselves
-	}
-	if isDescendantOf(peer, daemon) {
-		return true
-	}
-	cmd := procCommand(peer)
-	log.Printf("askpass refused: peer pid=%d cmd=%q is not a descendant of daemon pid=%d", peer, cmd, daemon)
-	notify(s.out, s.cfg, s.bot, false,
-		fmt.Sprintf("❌ askpass refused\npid=%d cmd=%q", peer, cmd))
-	return false
-}
-
-// procCommand returns /proc/$pid/comm, trimmed. Best-effort; "" on failure.
-func procCommand(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func peerPID(uc *net.UnixConn) (int, error) {
-	raw, err := uc.SyscallConn()
-	if err != nil {
-		return 0, err
-	}
-	var ucred *syscall.Ucred
-	var sockErr error
-	if err := raw.Control(func(fd uintptr) {
-		ucred, sockErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil {
-		return 0, err
-	}
-	if sockErr != nil {
-		return 0, sockErr
-	}
-	return int(ucred.Pid), nil
-}
-
-// isDescendantOf walks /proc/$pid/status's PPid: chain. Returns true if
-// ancestor appears anywhere above pid before hitting pid 1 / 0.
-func isDescendantOf(pid, ancestor int) bool {
-	for hops := 0; hops < 64; hops++ {
-		ppid, err := readPPID(pid)
-		if err != nil || ppid <= 1 {
-			return false
-		}
-		if ppid == ancestor {
-			return true
-		}
-		pid = ppid
-	}
-	return false
-}
-
-func readPPID(pid int) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "PPid:") {
-			continue
-		}
-		return strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
-	}
-	return 0, errors.New("PPid line missing")
 }
 
 // --- handlers ---
@@ -389,9 +281,6 @@ func (s *controlServer) hostRemove(args [][]byte) ([][]byte, error) {
 	}
 	if err := s.cfg.RemoveTarget(string(args[0])); err != nil {
 		return nil, err
-	}
-	if err := writeKnownHosts(s.cfg); err != nil {
-		return nil, fmt.Errorf("write known_hosts: %w", err)
 	}
 	return nil, nil
 }
@@ -842,16 +731,6 @@ func runGroupShow(selector string) {
 		os.Exit(1)
 	}
 	fmt.Println(text)
-}
-
-func runAskpass() {
-	// ASKPASS is special: it speaks raw ssh-askpass format, not OK/ERR.
-	cfg := loadConfigOrExit()
-	resp, err := rawControl(cfg.ControlSocket, "ASKPASS")
-	if err != nil {
-		os.Exit(1)
-	}
-	fmt.Print(resp)
 }
 
 // simpleControl runs a verb, prints the first response payload (if any) to
