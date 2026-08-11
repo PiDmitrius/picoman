@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,8 +87,7 @@ func getSFTP(ctx context.Context, cfg *config.Config, st *agent.State, t config.
 }
 
 func downloadSFTP(sftpClient *sftp.Client, remotePath, localPath string) error {
-	var err error
-	remotePath, err = expandRemoteHome(sftpClient, remotePath)
+	remotePath, err := expandRemoteHome(sftpClient, remotePath)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func downloadSFTP(sftpClient *sftp.Client, remotePath, localPath string) error {
 	}
 	defer remote.Close()
 
-	tmp, err := os.CreateTemp(pathDir(localPath), ".picoman-get-*")
+	tmp, err := os.CreateTemp(filepath.Dir(localPath), ".picoman-get-*")
 	if err != nil {
 		return err
 	}
@@ -295,15 +295,4 @@ func expandRemoteHome(client *sftp.Client, remotePath string) (string, error) {
 		return home, nil
 	}
 	return path.Join(home, strings.TrimPrefix(remotePath, "~/")), nil
-}
-
-func pathDir(name string) string {
-	i := strings.LastIndexByte(name, os.PathSeparator)
-	if i < 0 {
-		return "."
-	}
-	if i == 0 {
-		return string(os.PathSeparator)
-	}
-	return name[:i]
 }

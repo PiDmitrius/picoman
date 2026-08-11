@@ -47,6 +47,8 @@ type Config struct {
 	mu sync.RWMutex
 }
 
+const defaultSSHConnectTimeout = 10 * time.Second
+
 func (c *Config) Target(name string) (Target, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -233,7 +235,7 @@ func Default() *Config {
 		LegacyAgentSocket: filepath.Join(DataDir(), "agent.sock"),
 		ControlSocket:     filepath.Join(DataDir(), "control.sock"),
 		MaxUnlockTTL:      "15m",
-		SSHConnectTimeout: "10s",
+		SSHConnectTimeout: defaultSSHConnectTimeout.String(),
 		HostDB:            filepath.Join(Dir(), "hosts.json"),
 		WorkDir:           filepath.Join(home, "picoman"),
 		RemoteWorkDir:     "~/picoman",
@@ -394,13 +396,9 @@ func MaxTTL(c *Config) time.Duration {
 }
 
 func SSHConnectTimeout(c *Config) time.Duration {
-	return positiveDuration(c.SSHConnectTimeout, 10*time.Second)
-}
-
-func positiveDuration(value string, fallback time.Duration) time.Duration {
-	d, err := time.ParseDuration(value)
+	d, err := time.ParseDuration(c.SSHConnectTimeout)
 	if err != nil || d <= 0 {
-		return fallback
+		return defaultSSHConnectTimeout
 	}
 	return d
 }

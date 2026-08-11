@@ -53,7 +53,6 @@ func runDaemon() {
 	defer stop()
 
 	st := agent.New(cfg.KeyPath, config.MaxTTL(cfg))
-	st.CleanStart()
 	cleanup := agent.CleanLegacy(cfg.LegacyAgentSocket)
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
@@ -82,7 +81,7 @@ func runDaemon() {
 	if marker.Reason == "update" {
 		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
 	} else {
-		notify(out, cfg, bot, false, infoText(lifecycleText("started", cleanup)))
+		notify(out, cfg, bot, false, infoText(startupLifecycleText(cleanup)))
 	}
 
 	// Auto-unseal in a goroutine so startup is not blocked on a potentially
@@ -129,16 +128,20 @@ func runDaemon() {
 		}
 	}
 
-	cleanup = st.CleanStart()
-	notify(out, cfg, bot, false, infoText(lifecycleText("stopped", cleanup)))
+	st.Seal()
+	notify(out, cfg, bot, false, infoText(lifecycleText("stopped")))
 	// Stop the Run goroutine first so it doesn't race Flush on next().
 	stopOutbox()
 	<-out.Done()
 	flushOutbox(out)
 }
 
-func lifecycleText(event string, cleanup agent.CleanResult) string {
-	text := "picoman " + version + " " + event
+func lifecycleText(event string) string {
+	return "picoman " + version + " " + event
+}
+
+func startupLifecycleText(cleanup agent.CleanResult) string {
+	text := lifecycleText("started")
 	if !cleanup.OK() {
 		text += "\n\n" + cleanup.String()
 	}
@@ -425,11 +428,8 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 		if activeUntil.IsZero() || !activeUntil.Equal(until) {
 			continue
 		}
-		if err := st.Lock(); err != nil {
-			notify(out, cfg, bot, false, errorText("lock failed: "+err.Error()))
-		} else {
-			notify(out, cfg, bot, false, "🔒 locked")
-		}
+		st.Lock()
+		notify(out, cfg, bot, false, "🔒 locked")
 		activeUntil = time.Time{}
 	}
 }
@@ -802,17 +802,12 @@ func cmdUnseal(c cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
-	if err := c.st.Lock(); err != nil {
-		return cmdReply{}, err
-	}
 	c.st.Seal()
 	return cmdReply{text: "⚪ sealed"}, nil
 }
 
 func cmdLock(c cmdCtx, _ []string) (cmdReply, error) {
-	if err := c.st.Lock(); err != nil {
-		return cmdReply{}, err
-	}
+	c.st.Lock()
 	return cmdReply{text: "🔒 locked"}, nil
 }
 

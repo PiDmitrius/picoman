@@ -23,38 +23,8 @@ type State struct {
 	generation uint64
 }
 
-// Credential cleanup is entirely in-process and has no filesystem or process
-// residue to report in lifecycle messages.
-type CleanResult struct {
-	Agent   string
-	Socket  string
-	PIDFile string
-	Askpass string
-}
-
 func New(keyPath string, maxTTL time.Duration) *State {
 	return &State{keyPath: keyPath, maxTTL: maxTTL}
-}
-
-func (s *State) CleanStart() CleanResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.signer = nil
-	s.until = time.Time{}
-	s.passphrase = ""
-	s.generation++
-	return CleanResult{Agent: "none", Socket: "absent", PIDFile: "absent", Askpass: "absent"}
-}
-
-func (r CleanResult) OK() bool {
-	return r.Agent == "none" &&
-		(r.Socket == "absent" || r.Socket == "removed") &&
-		(r.PIDFile == "absent" || r.PIDFile == "removed") &&
-		(r.Askpass == "absent" || r.Askpass == "removed")
-}
-
-func (r CleanResult) String() string {
-	return fmt.Sprintf("legacy_agent: %s\nlegacy_socket: %s\nlegacy_pid_file: %s\nlegacy_askpass: %s", r.Agent, r.Socket, r.PIDFile, r.Askpass)
 }
 
 func (s *State) Unseal(passphrase string) error {
@@ -122,13 +92,12 @@ func (s *State) Unlock(ttl time.Duration) error {
 	return nil
 }
 
-func (s *State) Lock() error {
+func (s *State) Lock() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signer = nil
 	s.until = time.Time{}
 	s.generation++
-	return nil
 }
 
 func (s *State) IsUnlocked() bool {

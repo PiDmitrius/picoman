@@ -32,9 +32,7 @@ func TestCredentialLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Signer while unlocked: %v", err)
 	}
-	if err := state.Lock(); err != nil {
-		t.Fatalf("Lock: %v", err)
-	}
+	state.Lock()
 	if _, err := state.Signer(); err == nil {
 		t.Fatal("Signer remained available after lock")
 	}

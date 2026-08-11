@@ -7,8 +7,25 @@ import (
 	"strings"
 )
 
-// CleanLegacy removes credential capability artifacts created by releases
-// that used an external ssh-agent.
+type CleanResult struct {
+	Agent   string
+	Socket  string
+	PIDFile string
+	Askpass string
+}
+
+func (r CleanResult) OK() bool {
+	return r.Agent == "none" &&
+		(r.Socket == "absent" || r.Socket == "removed") &&
+		(r.PIDFile == "absent" || r.PIDFile == "removed") &&
+		(r.Askpass == "absent" || r.Askpass == "removed")
+}
+
+func (r CleanResult) String() string {
+	return fmt.Sprintf("legacy_agent: %s\nlegacy_socket: %s\nlegacy_pid_file: %s\nlegacy_askpass: %s", r.Agent, r.Socket, r.PIDFile, r.Askpass)
+}
+
+// CleanLegacy removes a tracked external signer capability, if present.
 func CleanLegacy(socket string) CleanResult {
 	if strings.TrimSpace(socket) == "" {
 		return CleanResult{Agent: "none", Socket: "absent", PIDFile: "absent", Askpass: "absent"}

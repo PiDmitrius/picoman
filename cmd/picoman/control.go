@@ -163,20 +163,13 @@ func (s *controlServer) unseal(args [][]byte) ([][]byte, error) {
 }
 
 func (s *controlServer) seal(_ [][]byte) ([][]byte, error) {
-	if err := s.st.Lock(); err != nil {
-		notify(s.out, s.cfg, s.bot, false, errorText("seal failed: "+err.Error()))
-		return nil, err
-	}
 	s.st.Seal()
 	notify(s.out, s.cfg, s.bot, false, "⚪ sealed")
 	return nil, nil
 }
 
 func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
-	if err := s.st.Lock(); err != nil {
-		notify(s.out, s.cfg, s.bot, false, errorText("lock failed: "+err.Error()))
-		return nil, err
-	}
+	s.st.Lock()
 	notify(s.out, s.cfg, s.bot, false, "🔒 locked")
 	return nil, nil
 }
