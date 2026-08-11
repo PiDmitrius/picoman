@@ -72,33 +72,6 @@ func TestUnlockTTLAndLimit(t *testing.T) {
 	}
 }
 
-func TestLegacyArtifactCleanup(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "agent.sock")
-	for _, path := range []string{socket, socket + "-askpass"} {
-		if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result := CleanLegacy(socket)
-	if !result.OK() {
-		t.Fatalf("CleanLegacy = %s", result.String())
-	}
-	for _, path := range []string{socket, socket + ".pid", socket + "-askpass"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("legacy artifact remains: %s", path)
-		}
-	}
-}
-
-func TestLegacyAgentCmdlineRecognition(t *testing.T) {
-	if !isLegacySSHAgentCmdline([]byte("/usr/bin/ssh-agent\x00-a\x00socket")) {
-		t.Fatal("ssh-agent cmdline rejected")
-	}
-	if isLegacySSHAgentCmdline([]byte("/tmp/not-ssh-agent\x00")) {
-		t.Fatal("non-agent cmdline accepted")
-	}
-}
-
 func writeEncryptedKey(t *testing.T, passphrase string) string {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)

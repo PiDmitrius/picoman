@@ -53,7 +53,6 @@ func runDaemon() {
 	defer stop()
 
 	st := agent.New(cfg.KeyPath, config.MaxTTL(cfg))
-	cleanup := agent.CleanLegacy(cfg.LegacyAgentSocket)
 	out, err := outbox.Open(config.DBPath(), bot)
 	if err != nil {
 		criticalNotifyUsers(cfg, bot, "outbox", err)
@@ -81,7 +80,7 @@ func runDaemon() {
 	if marker.Reason == "update" {
 		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
 	} else {
-		notify(out, cfg, bot, false, infoText(startupLifecycleText(cleanup)))
+		notify(out, cfg, bot, false, infoText(lifecycleText("started")))
 	}
 
 	// Auto-unseal in a goroutine so startup is not blocked on a potentially
@@ -138,14 +137,6 @@ func runDaemon() {
 
 func lifecycleText(event string) string {
 	return "picoman " + version + " " + event
-}
-
-func startupLifecycleText(cleanup agent.CleanResult) string {
-	text := lifecycleText("started")
-	if !cleanup.OK() {
-		text += "\n\n" + cleanup.String()
-	}
-	return text
 }
 
 func updateLifecycleText(marker restartMarker) string {

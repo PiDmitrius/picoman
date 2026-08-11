@@ -196,7 +196,14 @@ func TestSFTPPutAndGet(t *testing.T) {
 
 func TestProductionCodeHasNoExternalSSHCapability(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	forbidden := []string{"SSH_AUTH_SOCK", `CommandContext(ctx, "ssh"`, `CommandContext(ctx, "scp"`, `Command("ssh"`, `Command("scp"`}
+	forbidden := []string{
+		"SSH_AUTH_SOCK",
+		`CommandContext(ctx, "ssh"`, `Command("ssh"`,
+		`CommandContext(ctx, "scp"`, `Command("scp"`,
+		`CommandContext(ctx, "sftp"`, `Command("sftp"`,
+		`CommandContext(ctx, "ssh-agent"`, `Command("ssh-agent"`,
+		`CommandContext(ctx, "ssh-add"`, `Command("ssh-add"`,
+	}
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

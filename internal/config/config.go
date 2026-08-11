@@ -33,7 +33,6 @@ type Config struct {
 	KeyPath              string            `json:"key_path"`
 	KeyPassphrase        string            `json:"key_passphrase"`
 	KeyPassphraseCommand string            `json:"key_passphrase_command,omitempty"`
-	LegacyAgentSocket    string            `json:"agent_socket,omitempty"`
 	ControlSocket        string            `json:"control_socket"`
 	MaxUnlockTTL         string            `json:"max_unlock_ttl"`
 	SSHConnectTimeout    string            `json:"ssh_connect_timeout,omitempty"`
@@ -232,7 +231,6 @@ func DBPath() string {
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		LegacyAgentSocket: filepath.Join(DataDir(), "agent.sock"),
 		ControlSocket:     filepath.Join(DataDir(), "control.sock"),
 		MaxUnlockTTL:      "15m",
 		SSHConnectTimeout: defaultSSHConnectTimeout.String(),
@@ -416,9 +414,6 @@ func normalize(c *Config) (*Config, error) {
 		c = Default()
 	}
 	def := Default()
-	if c.LegacyAgentSocket == "" {
-		c.LegacyAgentSocket = def.LegacyAgentSocket
-	}
 	if c.ControlSocket == "" {
 		c.ControlSocket = def.ControlSocket
 	}
