@@ -149,7 +149,10 @@ func TestLockedBufferAcceptsConcurrentStreams(t *testing.T) {
 
 func TestSFTPPutAndGet(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	server := sftp.NewRequestServer(serverConn, sftp.InMemHandler())
+	handlers := sftp.InMemHandler()
+	fileCmd := &recordingFileCmd{FileCmder: handlers.FileCmd}
+	handlers.FileCmd = fileCmd
+	server := sftp.NewRequestServer(serverConn, handlers)
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve() }()
 	client, err := sftp.NewClientPipe(clientConn, clientConn)
@@ -166,6 +169,9 @@ func TestSFTPPutAndGet(t *testing.T) {
 	}
 	if err := uploadSFTP(client, source, "/remote"); err != nil {
 		t.Fatalf("uploadSFTP: %v", err)
+	}
+	if got, want := fileCmd.mode, os.FileMode(0o600); got != want {
+		t.Fatalf("remote mode = %o, want %o", got, want)
 	}
 	want = []byte("atomic replacement\n")
 	if err := os.WriteFile(source, want, 0o600); err != nil {
@@ -192,6 +198,22 @@ func TestSFTPPutAndGet(t *testing.T) {
 	if err := <-serverDone; err != nil && err != io.EOF {
 		t.Fatalf("SFTP server: %v", err)
 	}
+}
+
+type recordingFileCmd struct {
+	sftp.FileCmder
+	mode os.FileMode
+}
+
+func (h *recordingFileCmd) Filecmd(request *sftp.Request) error {
+	if request.Method == "Setstat" && request.AttrFlags().Permissions {
+		h.mode = request.Attributes().FileMode().Perm()
+	}
+	return h.FileCmder.Filecmd(request)
+}
+
+func (h *recordingFileCmd) PosixRename(request *sftp.Request) error {
+	return h.FileCmder.(sftp.PosixRenameFileCmder).PosixRename(request)
 }
 
 func TestProductionCodeHasNoExternalSSHCapability(t *testing.T) {

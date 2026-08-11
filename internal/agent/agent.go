@@ -95,6 +95,20 @@ func (s *State) Unlock(ttl time.Duration) error {
 func (s *State) Lock() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lock()
+}
+
+func (s *State) LockExpired(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signer == nil || s.until.IsZero() || now.Before(s.until) {
+		return false
+	}
+	s.lock()
+	return true
+}
+
+func (s *State) lock() {
 	s.signer = nil
 	s.until = time.Time{}
 	s.generation++

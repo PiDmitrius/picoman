@@ -70,6 +70,12 @@ func TestUnlockTTLAndLimit(t *testing.T) {
 	if _, err := signer.Sign(rand.Reader, []byte("after ttl")); err == nil {
 		t.Fatal("captured signer signed after TTL")
 	}
+	if !state.LockExpired(time.Now()) {
+		t.Fatal("expired signer was not removed")
+	}
+	if !state.Until().IsZero() {
+		t.Fatal("expired authorization remained active")
+	}
 }
 
 func writeEncryptedKey(t *testing.T, passphrase string) string {

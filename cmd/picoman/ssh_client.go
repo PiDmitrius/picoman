@@ -109,9 +109,6 @@ func downloadSFTP(sftpClient *sftp.Client, remotePath, localPath string) error {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		return err
-	}
 	if _, err := io.Copy(tmp, remote); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
@@ -156,6 +153,13 @@ func uploadSFTP(sftpClient *sftp.Client, localPath, remotePath string) error {
 	if err != nil {
 		return err
 	}
+	if _, ok := sftpClient.HasExtension("posix-rename@openssh.com"); !ok {
+		return errors.New("server does not support atomic file replacement")
+	}
+	info, err := local.Stat()
+	if err != nil {
+		return err
+	}
 	tempPath, err := remoteTempPath(remotePath)
 	if err != nil {
 		return err
@@ -170,6 +174,10 @@ func uploadSFTP(sftpClient *sftp.Client, localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("open remote file: %w", err)
 	}
+	if err := remote.Chmod(info.Mode().Perm()); err != nil {
+		remote.Close()
+		return fmt.Errorf("set remote mode: %w", err)
+	}
 	if _, err := io.Copy(remote, local); err != nil {
 		remote.Close()
 		return fmt.Errorf("upload: %w", err)
@@ -177,11 +185,7 @@ func uploadSFTP(sftpClient *sftp.Client, localPath, remotePath string) error {
 	if err := remote.Close(); err != nil {
 		return fmt.Errorf("close remote file: %w", err)
 	}
-	if _, ok := sftpClient.HasExtension("posix-rename@openssh.com"); ok {
-		err = sftpClient.PosixRename(tempPath, remotePath)
-	} else {
-		err = sftpClient.Rename(tempPath, remotePath)
-	}
+	err = sftpClient.PosixRename(tempPath, remotePath)
 	if err != nil {
 		return fmt.Errorf("commit remote file: %w", err)
 	}
@@ -209,7 +213,9 @@ func dialSSH(ctx context.Context, cfg *config.Config, st *agent.State, t config.
 	}
 
 	address := net.JoinHostPort(t.Host, strconv.Itoa(targetPort(t)))
-	dialer := net.Dialer{Timeout: config.SSHConnectTimeout(cfg)}
+	connectTimeout := config.SSHConnectTimeout(cfg)
+	handshakeDeadline := time.Now().Add(connectTimeout)
+	dialer := net.Dialer{Timeout: connectTimeout}
 	netConn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect %s: %w", address, err)
@@ -223,7 +229,6 @@ func dialSSH(ctx context.Context, cfg *config.Config, st *agent.State, t config.
 		}
 	}()
 
-	handshakeDeadline := time.Now().Add(config.SSHConnectTimeout(cfg))
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
 		handshakeDeadline = deadline
 	}

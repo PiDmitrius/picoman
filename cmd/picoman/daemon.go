@@ -399,7 +399,6 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	var activeUntil time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -407,21 +406,10 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 		case <-ticker.C:
 		}
 
-		until := st.Until()
-		if until.IsZero() {
-			activeUntil = time.Time{}
+		if !st.LockExpired(time.Now()) {
 			continue
 		}
-		if time.Now().Before(until) {
-			activeUntil = until
-			continue
-		}
-		if activeUntil.IsZero() || !activeUntil.Equal(until) {
-			continue
-		}
-		st.Lock()
 		notify(out, cfg, bot, false, "🔒 locked")
-		activeUntil = time.Time{}
 	}
 }
 
