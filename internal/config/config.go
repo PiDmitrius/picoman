@@ -33,9 +33,9 @@ type Config struct {
 	KeyPath              string            `json:"key_path"`
 	KeyPassphrase        string            `json:"key_passphrase"`
 	KeyPassphraseCommand string            `json:"key_passphrase_command,omitempty"`
-	AgentSocket          string            `json:"agent_socket"`
 	ControlSocket        string            `json:"control_socket"`
 	MaxUnlockTTL         string            `json:"max_unlock_ttl"`
+	SSHConnectTimeout    string            `json:"ssh_connect_timeout,omitempty"`
 	DeveloperDir         string            `json:"developer_dir"`
 	HostDB               string            `json:"host_db"`
 	WorkDir              string            `json:"work_dir"`
@@ -45,6 +45,8 @@ type Config struct {
 
 	mu sync.RWMutex
 }
+
+const defaultSSHConnectTimeout = 10 * time.Second
 
 func (c *Config) Target(name string) (Target, bool) {
 	c.mu.RLock()
@@ -226,21 +228,17 @@ func DBPath() string {
 	return filepath.Join(DataDir(), "picoman.sqlite")
 }
 
-func KnownHostsPath() string {
-	return filepath.Join(DataDir(), "known_hosts")
-}
-
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		AgentSocket:   filepath.Join(DataDir(), "agent.sock"),
-		ControlSocket: filepath.Join(DataDir(), "control.sock"),
-		MaxUnlockTTL:  "15m",
-		HostDB:        filepath.Join(Dir(), "hosts.json"),
-		WorkDir:       filepath.Join(home, "picoman"),
-		RemoteWorkDir: "~/picoman",
-		LogLevel:      "chat",
-		Targets:       map[string]Target{},
+		ControlSocket:     filepath.Join(DataDir(), "control.sock"),
+		MaxUnlockTTL:      "15m",
+		SSHConnectTimeout: defaultSSHConnectTimeout.String(),
+		HostDB:            filepath.Join(Dir(), "hosts.json"),
+		WorkDir:           filepath.Join(home, "picoman"),
+		RemoteWorkDir:     "~/picoman",
+		LogLevel:          "chat",
+		Targets:           map[string]Target{},
 	}
 }
 
@@ -317,9 +315,8 @@ func saveConfigField(name string, value any) error {
 	return writeAtomic(path, data, 0o600)
 }
 
-// writeAtomic writes content to path via temp+rename so the destination is
-// never observed half-written. Used for config and host DB (and known_hosts
-// goes through the same pattern in daemon.go).
+// writeAtomic writes content via temp+rename so config and host DB files are
+// never observed half-written.
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".write-*")
@@ -396,6 +393,14 @@ func MaxTTL(c *Config) time.Duration {
 	return d
 }
 
+func SSHConnectTimeout(c *Config) time.Duration {
+	d, err := time.ParseDuration(c.SSHConnectTimeout)
+	if err != nil || d <= 0 {
+		return defaultSSHConnectTimeout
+	}
+	return d
+}
+
 func AllowedSet(c *Config) map[int64]bool {
 	out := make(map[int64]bool, len(c.AllowedUsers))
 	for _, id := range c.AllowedUsers {
@@ -409,14 +414,19 @@ func normalize(c *Config) (*Config, error) {
 		c = Default()
 	}
 	def := Default()
-	if c.AgentSocket == "" {
-		c.AgentSocket = def.AgentSocket
-	}
 	if c.ControlSocket == "" {
 		c.ControlSocket = def.ControlSocket
 	}
 	if c.MaxUnlockTTL == "" {
 		c.MaxUnlockTTL = def.MaxUnlockTTL
+	}
+	if c.SSHConnectTimeout == "" {
+		c.SSHConnectTimeout = def.SSHConnectTimeout
+	}
+	if d, err := time.ParseDuration(c.SSHConnectTimeout); err != nil {
+		return nil, fmt.Errorf("invalid ssh_connect_timeout %q", c.SSHConnectTimeout)
+	} else if d <= 0 {
+		return nil, fmt.Errorf("ssh_connect_timeout must be positive")
 	}
 	if c.HostDB == "" {
 		c.HostDB = def.HostDB

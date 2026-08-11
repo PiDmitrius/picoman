@@ -1,354 +1,177 @@
 package agent
 
 import (
-	"bytes"
-	"context"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
+// State is the sole owner of decrypted SSH credential material. It never
+// exports a socket or starts an external signer process.
 type State struct {
-	// Immutable after New().
-	socket      string
-	pidPath     string
-	keyPath     string
-	maxTTL      time.Duration
-	askpassPath string // path to the SSH_ASKPASS bridge script (created on first Unlock and reused)
+	keyPath string
+	maxTTL  time.Duration
 
-	// ioMu serializes ssh-agent/ssh-add invocations so state-getters
-	// (Sealed, IsUnlocked, Until) do not block on external I/O.
-	ioMu sync.Mutex
-
-	// stateMu protects the mutable fields below.
-	stateMu    sync.RWMutex
-	pid        int
+	mu         sync.RWMutex
 	until      time.Time
 	passphrase string
-	startedAt  time.Time
+	signer     ssh.Signer
+	generation uint64
 }
 
-type CleanResult struct {
-	Agent   string
-	Socket  string
-	PIDFile string
-}
-
-func New(socket, keyPath string, maxTTL time.Duration) *State {
-	return &State{socket: socket, pidPath: socket + ".pid", keyPath: keyPath, maxTTL: maxTTL}
-}
-
-// PrepareAskpass creates a symlink to the picoman binary with a "-askpass"
-// suffix. ssh-add execs SSH_ASKPASS via execve, so the file must be an
-// executable — not a shell command. The "-askpass" suffix lets main.go
-// detect by argv[0] that it was invoked as the askpass helper and skip the
-// normal verb dispatch. Cheaper than a shell-script wrapper, no extra sh
-// fork, and one less moving piece on disk.
-func (s *State) PrepareAskpass() error {
-	if s.askpassPath != "" {
-		return nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	path := s.socket + "-askpass"
-	_ = os.Remove(path) // stale link from a previous run
-	if err := os.Symlink(exe, path); err != nil {
-		return err
-	}
-	s.askpassPath = path
-	return nil
-}
-
-func (s *State) CleanStart() CleanResult {
-	s.ioMu.Lock()
-	defer s.ioMu.Unlock()
-
-	agentStatus := s.killOldAgent()
-	if s.askpassPath != "" {
-		_ = os.Remove(s.askpassPath)
-		s.askpassPath = ""
-	}
-
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	s.pid = 0
-	s.until = time.Time{}
-	s.passphrase = ""
-	return CleanResult{
-		Agent:   agentStatus,
-		Socket:  removeStatus(s.socket),
-		PIDFile: removeStatus(s.pidPath),
-	}
-}
-
-func (r CleanResult) OK() bool {
-	return r.Agent == "none" &&
-		(r.Socket == "absent" || r.Socket == "removed") &&
-		(r.PIDFile == "absent" || r.PIDFile == "removed")
-}
-
-func (r CleanResult) String() string {
-	return fmt.Sprintf("agent: %s\nsocket: %s\npid_file: %s", r.Agent, r.Socket, r.PIDFile)
+func New(keyPath string, maxTTL time.Duration) *State {
+	return &State{keyPath: keyPath, maxTTL: maxTTL}
 }
 
 func (s *State) Unseal(passphrase string) error {
-	if err := s.verifyPassphrase(passphrase); err != nil {
+	if _, err := s.parseSigner(passphrase); err != nil {
 		return err
 	}
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
+	s.mu.Lock()
 	s.passphrase = passphrase
+	s.mu.Unlock()
 	return nil
 }
 
-func (s *State) verifyPassphrase(passphrase string) error {
+func (s *State) parseSigner(passphrase string) (ssh.Signer, error) {
 	if s.keyPath == "" {
-		return fmt.Errorf("key_path is empty")
+		return nil, fmt.Errorf("key_path is empty")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ssh-keygen", "-y", "-P", passphrase, "-f", s.keyPath)
-	devnull, err := os.Open(os.DevNull)
+	key, err := os.ReadFile(s.keyPath)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("read key: %w", err)
 	}
-	defer devnull.Close()
-	cmd.Stdin = devnull
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bad passphrase")
+	signer, err := ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))
+	if err != nil {
+		return nil, fmt.Errorf("bad passphrase")
 	}
-	return nil
+	return signer, nil
 }
 
 func (s *State) Seal() {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signer = nil
+	s.until = time.Time{}
 	s.passphrase = ""
-}
-
-func (s *State) Passphrase() string {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
-	return s.passphrase
+	s.generation++
 }
 
 func (s *State) Sealed() bool {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.passphrase == ""
 }
 
 func (s *State) Unlock(ttl time.Duration) error {
-	if s.keyPath == "" {
-		return fmt.Errorf("key_path is empty")
-	}
 	if ttl <= 0 {
 		return fmt.Errorf("ttl must be positive")
 	}
 	if ttl > s.maxTTL {
 		return fmt.Errorf("ttl exceeds max %s", s.maxTTL)
 	}
-	if s.Sealed() {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	passphrase := s.passphrase
+	if passphrase == "" {
 		return fmt.Errorf("sealed")
 	}
-
-	s.ioMu.Lock()
-	defer s.ioMu.Unlock()
-
-	if err := s.ensureAgent(); err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := s.PrepareAskpass(); err != nil {
-		return fmt.Errorf("askpass bridge: %w", err)
-	}
-	cmd := exec.CommandContext(ctx, "ssh-add", "-t", strconv.Itoa(int(ttl.Seconds())), s.keyPath)
-	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+s.socket)
-	devnull, err := os.Open(os.DevNull)
+	signer, err := s.parseSigner(passphrase)
 	if err != nil {
 		return err
 	}
-	defer devnull.Close()
-	cmd.Stdin = devnull
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = append(cmd.Env,
-		"SSH_ASKPASS="+s.askpassPath,
-		"SSH_ASKPASS_REQUIRE=force",
-		"DISPLAY=picoman",
-	)
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ssh-add: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	s.stateMu.Lock()
+	s.signer = signer
 	s.until = time.Now().Add(ttl)
-	s.stateMu.Unlock()
+	s.generation++
 	return nil
 }
 
-func (s *State) Lock() error {
-	s.ioMu.Lock()
-	defer s.ioMu.Unlock()
+func (s *State) Lock() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lock()
+}
 
-	s.stateMu.RLock()
-	pid := s.pid
-	s.stateMu.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ssh-add", "-D")
-	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+s.socket)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil && pid != 0 {
-		return fmt.Errorf("ssh-add -D: %w: %s", err, strings.TrimSpace(stderr.String()))
+func (s *State) LockExpired(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signer == nil || s.until.IsZero() || now.Before(s.until) {
+		return false
 	}
-	s.killOldAgent()
-	_ = os.Remove(s.socket)
-	_ = os.Remove(s.pidPath)
-	s.stateMu.Lock()
-	s.pid = 0
+	s.lock()
+	return true
+}
+
+func (s *State) lock() {
+	s.signer = nil
 	s.until = time.Time{}
-	s.stateMu.Unlock()
-	return nil
+	s.generation++
 }
 
 func (s *State) IsUnlocked() bool {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
-	return s.pid != 0 && time.Now().Before(s.until)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.signer != nil && time.Now().Before(s.until)
 }
 
 func (s *State) Until() time.Time {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.until
 }
 
-func (s *State) Socket() string {
-	return s.socket
+func (s *State) Signer() (ssh.Signer, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.signer == nil || !time.Now().Before(s.until) {
+		return nil, fmt.Errorf("key is locked")
+	}
+	return &guardedSigner{state: s, generation: s.generation, publicKey: s.signer.PublicKey()}, nil
 }
 
-// ensureAgent starts ssh-agent if not already running.
-// Caller must hold ioMu.
-func (s *State) ensureAgent() error {
-	s.stateMu.RLock()
-	pid := s.pid
-	s.stateMu.RUnlock()
-	if pid != 0 {
-		return nil
-	}
+type guardedSigner struct {
+	state      *State
+	generation uint64
+	publicKey  ssh.PublicKey
+}
 
-	if err := os.MkdirAll(filepath.Dir(s.socket), 0o700); err != nil {
-		return err
-	}
-	_ = os.Remove(s.socket)
+func (s *guardedSigner) PublicKey() ssh.PublicKey { return s.publicKey }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ssh-agent", "-a", s.socket, "-s")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ssh-agent: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	newPID, err := parseAgentPID(stdout.String())
+func (s *guardedSigner) Sign(random io.Reader, data []byte) (*ssh.Signature, error) {
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	signer, err := s.currentSigner()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	s.stateMu.Lock()
-	s.pid = newPID
-	s.startedAt = time.Now()
-	s.stateMu.Unlock()
-	_ = os.WriteFile(s.pidPath, []byte(strconv.Itoa(newPID)), 0o600)
-	return nil
+	return signer.Sign(random, data)
 }
 
-// killOldAgent stops any tracked ssh-agent. Caller must hold ioMu.
-func (s *State) killOldAgent() string {
-	s.stateMu.RLock()
-	pid := s.pid
-	s.stateMu.RUnlock()
-	if pid == 0 {
-		data, err := os.ReadFile(s.pidPath)
-		if err == nil {
-			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
-		}
-	}
-	if pid > 0 {
-		if !isSSHAgent(pid) {
-			return fmt.Sprintf("agent: pid %d is not ssh-agent, left untouched", pid)
-		}
-		if p, err := os.FindProcess(pid); err == nil {
-			if err := p.Kill(); err != nil {
-				return fmt.Sprintf("agent: kill pid %d failed: %v", pid, err)
-			}
-			_, _ = p.Wait()
-			return fmt.Sprintf("agent: killed pid %d", pid)
-		}
-	}
-	return "none"
-}
-
-func removeStatus(path string) string {
-	err := os.Remove(path)
-	switch {
-	case err == nil:
-		return "removed"
-	case os.IsNotExist(err):
-		return "absent"
-	default:
-		return "remove failed: " + err.Error()
-	}
-}
-
-func isSSHAgent(pid int) bool {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+func (s *guardedSigner) SignWithAlgorithm(random io.Reader, data []byte, algorithm string) (*ssh.Signature, error) {
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	signer, err := s.currentSigner()
 	if err != nil {
-		return false
+		return nil, err
 	}
-	return strings.Contains(string(data), "ssh-agent")
+	algorithmSigner, ok := signer.(ssh.AlgorithmSigner)
+	if !ok {
+		return nil, fmt.Errorf("signer does not support algorithm selection")
+	}
+	return algorithmSigner.SignWithAlgorithm(random, data, algorithm)
 }
 
-func parseAgentPID(output string) (int, error) {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "SSH_AGENT_PID=") {
-			continue
-		}
-		value := strings.TrimPrefix(line, "SSH_AGENT_PID=")
-		value = strings.TrimSuffix(value, "; export SSH_AGENT_PID;")
-		value = strings.TrimSpace(value)
-		pid, err := strconv.Atoi(value)
-		if err != nil {
-			return 0, err
-		}
-		return pid, nil
+func (s *guardedSigner) currentSigner() (ssh.Signer, error) {
+	if s.state.signer == nil || s.state.generation != s.generation || !time.Now().Before(s.state.until) {
+		return nil, fmt.Errorf("key is locked")
 	}
-	return 0, fmt.Errorf("could not parse SSH_AGENT_PID from ssh-agent output")
+	return s.state.signer, nil
 }
+
+var _ ssh.AlgorithmSigner = (*guardedSigner)(nil)

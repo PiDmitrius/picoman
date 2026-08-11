@@ -48,7 +48,7 @@ func TestNormalizeCommandFieldsSplitsUnlockMax(t *testing.T) {
 }
 
 func TestHandleUnlockMaxUsesMaxTTL(t *testing.T) {
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Hour)
+	st := agent.New(t.TempDir()+"/key", time.Hour)
 	if _, err := handleUnlock([]string{"/unlock", "max"}, st, 2*time.Hour); err == nil {
 		t.Fatal("handleUnlock succeeded with locked key")
 	} else if strings.Contains(err.Error(), "bad ttl") {
@@ -417,7 +417,7 @@ func TestChatLogLevelKeepsRunErrorMinimal(t *testing.T) {
 			"host": {User: "user", Host: "host.example"},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"run", "host", "secret", "command"})
 	if err == nil {
 		t.Fatal("cmdRun succeeded with locked key")
@@ -454,7 +454,7 @@ func TestAllLogLevelKeepsRunErrorDetails(t *testing.T) {
 			"host": {User: "user", Host: "host.example"},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"run", "host", "secret", "command"})
 	if err == nil {
 		t.Fatal("cmdRun succeeded with locked key")
@@ -470,7 +470,7 @@ func TestChatLogLevelKeepsTransferErrorsMinimal(t *testing.T) {
 			"host": {User: "user", Host: "host.example"},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	for _, tt := range []struct {
 		name   string
 		fn     func(cmdCtx, []string) (cmdReply, error)
@@ -501,7 +501,7 @@ func TestPutCommandAcceptsGroupSelector(t *testing.T) {
 			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	reply, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"put", "@web", "local", "remote"})
 	if err == nil {
 		t.Fatal("command succeeded with locked key")
@@ -521,7 +521,7 @@ func TestPutCommandAcceptsTargetExpression(t *testing.T) {
 			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	reply, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"put", "one,@web", "local", "remote"})
 	if err == nil {
 		t.Fatal("command succeeded with locked key")
@@ -540,7 +540,7 @@ func TestGetCommandRejectsGroupSelector(t *testing.T) {
 			"host": {User: "user", Host: "host.example", Groups: []string{"web"}},
 		},
 	}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	if _, err := cmdGet(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"get", "@web", "remote", "local"}); err == nil {
 		t.Fatal("cmdGet accepted group selector")
 	} else if !strings.Contains(err.Error(), "get on group is not supported") {
@@ -550,7 +550,7 @@ func TestGetCommandRejectsGroupSelector(t *testing.T) {
 
 func TestPutCommandRejectsEmptyGroupSelector(t *testing.T) {
 	cfg := &config.Config{Targets: map[string]config.Target{}}
-	st := agent.New(t.TempDir()+"/agent.sock", t.TempDir()+"/key", time.Minute)
+	st := agent.New(t.TempDir()+"/key", time.Minute)
 	if _, err := cmdPut(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"put", "@empty", "local", "remote"}); err == nil {
 		t.Fatal("cmdPut accepted empty group")
 	} else if !strings.Contains(err.Error(), `group "@empty" is empty`) {
