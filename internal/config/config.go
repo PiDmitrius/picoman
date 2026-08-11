@@ -37,7 +37,6 @@ type Config struct {
 	ControlSocket        string            `json:"control_socket"`
 	MaxUnlockTTL         string            `json:"max_unlock_ttl"`
 	SSHConnectTimeout    string            `json:"ssh_connect_timeout,omitempty"`
-	SSHOperationTimeout  string            `json:"ssh_operation_timeout,omitempty"`
 	DeveloperDir         string            `json:"developer_dir"`
 	HostDB               string            `json:"host_db"`
 	WorkDir              string            `json:"work_dir"`
@@ -231,16 +230,15 @@ func DBPath() string {
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		LegacyAgentSocket:   filepath.Join(DataDir(), "agent.sock"),
-		ControlSocket:       filepath.Join(DataDir(), "control.sock"),
-		MaxUnlockTTL:        "15m",
-		SSHConnectTimeout:   "10s",
-		SSHOperationTimeout: "10m",
-		HostDB:              filepath.Join(Dir(), "hosts.json"),
-		WorkDir:             filepath.Join(home, "picoman"),
-		RemoteWorkDir:       "~/picoman",
-		LogLevel:            "chat",
-		Targets:             map[string]Target{},
+		LegacyAgentSocket: filepath.Join(DataDir(), "agent.sock"),
+		ControlSocket:     filepath.Join(DataDir(), "control.sock"),
+		MaxUnlockTTL:      "15m",
+		SSHConnectTimeout: "10s",
+		HostDB:            filepath.Join(Dir(), "hosts.json"),
+		WorkDir:           filepath.Join(home, "picoman"),
+		RemoteWorkDir:     "~/picoman",
+		LogLevel:          "chat",
+		Targets:           map[string]Target{},
 	}
 }
 
@@ -399,10 +397,6 @@ func SSHConnectTimeout(c *Config) time.Duration {
 	return positiveDuration(c.SSHConnectTimeout, 10*time.Second)
 }
 
-func SSHOperationTimeout(c *Config) time.Duration {
-	return positiveDuration(c.SSHOperationTimeout, 10*time.Minute)
-}
-
 func positiveDuration(value string, fallback time.Duration) time.Duration {
 	d, err := time.ParseDuration(value)
 	if err != nil || d <= 0 {
@@ -436,18 +430,10 @@ func normalize(c *Config) (*Config, error) {
 	if c.SSHConnectTimeout == "" {
 		c.SSHConnectTimeout = def.SSHConnectTimeout
 	}
-	if c.SSHOperationTimeout == "" {
-		c.SSHOperationTimeout = def.SSHOperationTimeout
-	}
 	if d, err := time.ParseDuration(c.SSHConnectTimeout); err != nil {
 		return nil, fmt.Errorf("invalid ssh_connect_timeout %q", c.SSHConnectTimeout)
 	} else if d <= 0 {
 		return nil, fmt.Errorf("ssh_connect_timeout must be positive")
-	}
-	if d, err := time.ParseDuration(c.SSHOperationTimeout); err != nil {
-		return nil, fmt.Errorf("invalid ssh_operation_timeout %q", c.SSHOperationTimeout)
-	} else if d <= 0 {
-		return nil, fmt.Errorf("ssh_operation_timeout must be positive")
 	}
 	if c.HostDB == "" {
 		c.HostDB = def.HostDB

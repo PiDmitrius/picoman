@@ -24,10 +24,7 @@ import (
 )
 
 func runSSH(ctx context.Context, cfg *config.Config, st *agent.State, t config.Target, command string) (string, int, error) {
-	opCtx, cancel := context.WithTimeout(ctx, config.SSHOperationTimeout(cfg))
-	defer cancel()
-
-	client, closeClient, err := dialSSH(opCtx, cfg, st, t)
+	client, closeClient, err := dialSSH(ctx, cfg, st, t)
 	if err != nil {
 		return err.Error(), 255, nil
 	}
@@ -75,10 +72,7 @@ func (b *lockedBuffer) String() string {
 }
 
 func getSFTP(ctx context.Context, cfg *config.Config, st *agent.State, t config.Target, remotePath, localPath string) error {
-	opCtx, cancel := context.WithTimeout(ctx, config.SSHOperationTimeout(cfg))
-	defer cancel()
-
-	client, closeClient, err := dialSSH(opCtx, cfg, st, t)
+	client, closeClient, err := dialSSH(ctx, cfg, st, t)
 	if err != nil {
 		return err
 	}
@@ -138,10 +132,7 @@ func downloadSFTP(sftpClient *sftp.Client, remotePath, localPath string) error {
 }
 
 func putSFTP(ctx context.Context, cfg *config.Config, st *agent.State, t config.Target, localPath, remotePath string) error {
-	opCtx, cancel := context.WithTimeout(ctx, config.SSHOperationTimeout(cfg))
-	defer cancel()
-
-	client, closeClient, err := dialSSH(opCtx, cfg, st, t)
+	client, closeClient, err := dialSSH(ctx, cfg, st, t)
 	if err != nil {
 		return err
 	}
@@ -223,6 +214,8 @@ func dialSSH(ctx context.Context, cfg *config.Config, st *agent.State, t config.
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect %s: %w", address, err)
 	}
+	stopHandshakeCancel := context.AfterFunc(ctx, func() { _ = netConn.Close() })
+	defer stopHandshakeCancel()
 	connected := false
 	defer func() {
 		if !connected {
@@ -246,6 +239,10 @@ func dialSSH(ctx context.Context, cfg *config.Config, st *agent.State, t config.
 	conn, channels, requests, err := ssh.NewClientConn(netConn, address, clientConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ssh handshake: %w", err)
+	}
+	if !stopHandshakeCancel() {
+		conn.Close()
+		return nil, nil, ctx.Err()
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := netConn.SetDeadline(deadline); err != nil {

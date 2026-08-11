@@ -37,7 +37,7 @@ func TestDialSSHHandshakeTimeout(t *testing.T) {
 
 	state, publicKey := unlockedTestState(t)
 	port := listener.Addr().(*net.TCPAddr).Port
-	cfg := &config.Config{SSHConnectTimeout: "50ms", SSHOperationTimeout: "1s"}
+	cfg := &config.Config{SSHConnectTimeout: "50ms"}
 	target := config.Target{User: "user", Host: "127.0.0.1", Port: port, PublicKey: publicKey}
 	started := time.Now()
 	if _, _, err := dialSSH(context.Background(), cfg, state, target); err == nil {
@@ -51,6 +51,51 @@ func TestDialSSHHandshakeTimeout(t *testing.T) {
 		conn.Close()
 	case <-time.After(time.Second):
 		t.Fatal("test server did not accept connection")
+	}
+}
+
+func TestDialSSHHandshakeCancellation(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	state, publicKey := unlockedTestState(t)
+	port := listener.Addr().(*net.TCPAddr).Port
+	cfg := &config.Config{SSHConnectTimeout: "30s"}
+	target := config.Target{User: "user", Host: "127.0.0.1", Port: port, PublicKey: publicKey}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := dialSSH(ctx, cfg, state, target)
+		done <- err
+	}()
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("test server did not accept connection")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("dialSSH succeeded after cancellation")
+		}
+		if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+			t.Fatalf("handshake cancellation took %s", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handshake did not stop after cancellation")
 	}
 }
 

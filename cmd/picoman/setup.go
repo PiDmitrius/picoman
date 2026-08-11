@@ -35,7 +35,6 @@ func runSetup() {
 	cfg.ControlSocket = expandPathValue(promptStringKeep(reader, "Control socket", displayPathValue(cfg.ControlSocket)), "")
 	cfg.MaxUnlockTTL = promptDurationKeep(reader, "Max unlock TTL", cfg.MaxUnlockTTL)
 	cfg.SSHConnectTimeout = promptDurationKeep(reader, "SSH connect timeout", cfg.SSHConnectTimeout)
-	cfg.SSHOperationTimeout = promptDurationKeep(reader, "SSH operation timeout", cfg.SSHOperationTimeout)
 	cfg.HostDB = expandPathValue(promptStringKeep(reader, "Host database", displayPathValue(cfg.HostDB)), "")
 	cfg.WorkDir = expandPathValue(promptStringKeep(reader, "Local work directory", displayPathValue(cfg.WorkDir)), "")
 	cfg.RemoteWorkDir = promptStringKeep(reader, "Remote work directory", cfg.RemoteWorkDir)

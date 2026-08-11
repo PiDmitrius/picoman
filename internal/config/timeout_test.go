@@ -13,17 +13,12 @@ func TestSSHTimeoutDefaults(t *testing.T) {
 	if got := SSHConnectTimeout(cfg); got != 10*time.Second {
 		t.Fatalf("connect timeout = %s", got)
 	}
-	if got := SSHOperationTimeout(cfg); got != 10*time.Minute {
-		t.Fatalf("operation timeout = %s", got)
-	}
 }
 
 func TestSSHTimeoutValidation(t *testing.T) {
 	for _, cfg := range []*Config{
 		{SSHConnectTimeout: "bad"},
 		{SSHConnectTimeout: "-1s"},
-		{SSHOperationTimeout: "bad"},
-		{SSHOperationTimeout: "0s"},
 	} {
 		if _, err := normalize(cfg); err == nil {
 			t.Fatalf("normalize accepted invalid timeouts: %#v", cfg)
