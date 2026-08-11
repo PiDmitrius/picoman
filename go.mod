@@ -1,16 +1,16 @@
 module picoman
 
-go 1.24.0
+go 1.25.0
 
-toolchain go1.24.4
+toolchain go1.26.5
 
 require (
-	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/pkg/sftp v1.13.10
-	golang.org/x/crypto v0.48.0
+	github.com/mattn/go-sqlite3 v1.14.49
+	github.com/pkg/sftp v1.13.11
+	golang.org/x/crypto v0.54.0
 )
 
 require (
 	github.com/kr/fs v0.1.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )
