@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"picoman/internal/transport"
 )
 
 type Client struct {
@@ -43,6 +45,20 @@ func New(token string) *Client {
 		token:  token,
 		client: &http.Client{Timeout: 70 * time.Second},
 	}
+}
+
+func (c *Client) GetMe(ctx context.Context) (User, error) {
+	var decoded struct {
+		OK     bool `json:"ok"`
+		Result User `json:"result"`
+	}
+	if err := c.call(ctx, http.MethodGet, "getMe", nil, &decoded); err != nil {
+		return User{}, err
+	}
+	if !decoded.OK {
+		return User{}, fmt.Errorf("telegram returned ok=false")
+	}
+	return decoded.Result, nil
 }
 
 func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
@@ -122,6 +138,7 @@ func (c *Client) SendHTMLReplyResult(ctx context.Context, chatID, replyToID int6
 }
 
 func (c *Client) sendMessage(ctx context.Context, values url.Values) (Message, error) {
+	values.Set("disable_web_page_preview", "true")
 	var decoded struct {
 		OK     bool    `json:"ok"`
 		Result Message `json:"result"`
@@ -154,7 +171,48 @@ func (c *Client) EditHTMLMessage(ctx context.Context, chatID, messageID int64, t
 	return c.editMessage(ctx, values)
 }
 
+func (c *Client) Send(ctx context.Context, chatID, replyTo, text, format string) (string, error) {
+	if _, err := strconv.ParseInt(chatID, 10, 64); err != nil {
+		return "", fmt.Errorf("invalid telegram chat id %q", chatID)
+	}
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("text", text)
+	if replyTo != "" {
+		if _, err := strconv.ParseInt(replyTo, 10, 64); err != nil {
+			return "", fmt.Errorf("invalid telegram reply id %q", replyTo)
+		}
+		values.Set("reply_to_message_id", replyTo)
+	}
+	if format == "html" {
+		values.Set("parse_mode", "HTML")
+	}
+	msg, err := c.sendMessage(ctx, values)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(msg.MessageID, 10), nil
+}
+
+func (c *Client) Edit(ctx context.Context, chatID, messageID, text, format string) error {
+	if _, err := strconv.ParseInt(chatID, 10, 64); err != nil {
+		return fmt.Errorf("invalid telegram chat id %q", chatID)
+	}
+	if _, err := strconv.ParseInt(messageID, 10, 64); err != nil {
+		return fmt.Errorf("invalid telegram message id %q", messageID)
+	}
+	values := url.Values{}
+	values.Set("chat_id", chatID)
+	values.Set("message_id", messageID)
+	values.Set("text", text)
+	if format == "html" {
+		values.Set("parse_mode", "HTML")
+	}
+	return c.editMessage(ctx, values)
+}
+
 func (c *Client) editMessage(ctx context.Context, values url.Values) error {
+	values.Set("disable_web_page_preview", "true")
 	var decoded struct {
 		OK bool `json:"ok"`
 	}
@@ -170,19 +228,7 @@ func (c *Client) editMessage(ctx context.Context, values url.Values) error {
 // APIError is a Telegram API error from a non-2xx response.
 // Network and transport errors are returned as-is from c.client.Do and are
 // not wrapped in APIError, so callers can distinguish them with errors.As.
-type APIError struct {
-	Code        int
-	Description string
-	RetryAfter  int
-}
-
-func (e *APIError) Error() string {
-	return fmt.Sprintf("telegram %d: %s", e.Code, e.Description)
-}
-
-func (e *APIError) IsRetryable() bool {
-	return e.RetryAfter > 0 || e.Code == 429 || e.Code >= 500
-}
+type APIError = transport.APIError
 
 func (c *Client) call(ctx context.Context, method, apiMethod string, values url.Values, out any) error {
 	endpoint := "https://api.telegram.org/bot" + c.token + "/" + apiMethod
@@ -225,6 +271,7 @@ func (c *Client) call(ctx context.Context, method, apiMethod string, values url.
 			code = resp.StatusCode
 		}
 		return &APIError{
+			Platform:    "telegram",
 			Code:        code,
 			Description: decoded.Description,
 			RetryAfter:  decoded.Parameters.RetryAfter,

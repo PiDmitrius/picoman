@@ -2,17 +2,512 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"picoman/internal/agent"
 	"picoman/internal/config"
+	maxclient "picoman/internal/max"
+	"picoman/internal/outbox"
+	"picoman/internal/transport"
 )
+
+func TestTransportAuthorizationUsesSeparateNamespaces(t *testing.T) {
+	clients := map[string]transport.Client{"tg": &testTransport{}, "mx": &testTransport{}}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{AllowedUsers: []int64{7}, MaxAllowedUsers: []int64{8}}
+	hub := &transportHub{cfg: cfg, clients: clients, out: store}
+	st := agent.New(t.TempDir()+"/key", time.Minute)
+	for _, msg := range []transport.Message{
+		{Address: transport.Address{Transport: "mx", ChatID: "7"}, SenderID: 7, Text: "/status"},
+		{Address: transport.Address{Transport: "tg", ChatID: "8"}, SenderID: 8, Text: "/status"},
+	} {
+		handleMessage(context.Background(), hub, cfg, st, newAuditState("chat"), nil, msg)
+	}
+	if err := store.SendOne(context.Background()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cross-transport ID was authorized: %v", err)
+	}
+	handleMessage(context.Background(), hub, cfg, st, newAuditState("chat"), nil, transport.Message{
+		Address: transport.Address{Transport: "mx", ChatID: "8"}, MessageID: "source", SenderID: 8, Text: "/status",
+	})
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatalf("MAX-allowed user was denied: %v", err)
+	}
+}
+
+func TestMAXInboundAcceptsDialogsOnly(t *testing.T) {
+	var update maxclient.Update
+	update.Type = "message_created"
+	update.Message.Sender.ID = 8
+	update.Message.Body.ID = "mid"
+	update.Message.Body.Text = "/status"
+	update.Message.Recipient.ChatType = "chat"
+	if _, ok := maxInboundMessage(update); ok {
+		t.Fatal("MAX group message was accepted")
+	}
+	update.Message.Recipient.ChatType = "dialog"
+	msg, ok := maxInboundMessage(update)
+	if !ok || msg.Address.ChatID != "8" || msg.MessageID != "mid" {
+		t.Fatalf("dialog conversion = %#v, %v", msg, ok)
+	}
+}
+
+func TestCommandContextOutlivesSourceTransport(t *testing.T) {
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	defer stopDaemon()
+	sourceCtx, stopSource := context.WithCancel(context.Background())
+	mgr := &transportManager{ctx: daemonCtx}
+	commandCtx := inboundCommandContext(sourceCtx, mgr)
+	stopSource()
+	select {
+	case <-commandCtx.Done():
+		t.Fatal("transport stop canceled in-flight command")
+	default:
+	}
+}
+
+type testTransport struct {
+	mu       sync.Mutex
+	messages []transport.Message
+	err      error
+	editErr  error
+	sent     chan struct{}
+}
+
+func (t *testTransport) Send(_ context.Context, chatID, replyTo, text, format string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.messages = append(t.messages, transport.Message{Address: transport.Address{ChatID: chatID}, MessageID: replyTo, Text: text})
+	if t.sent != nil {
+		t.sent <- struct{}{}
+	}
+	return "sent", t.err
+}
+
+func TestCriticalRetryStopsWhenTransportIsDisabled(t *testing.T) {
+	t.Setenv("PICOMAN_CONFIG_DIR", t.TempDir())
+	cfg := config.Default()
+	cfg.TelegramToken, cfg.AllowedUsers = "tg", []int64{1}
+	cfg.MaxToken, cfg.MaxAllowedUsers = "mx", []int64{2}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	client := &testTransport{err: errors.New("down"), sent: make(chan struct{}, 1)}
+	hub := &transportHub{cfg: cfg, clients: map[string]transport.Client{"mx": client}}
+	oldDelay := criticalRetryDelay
+	criticalRetryDelay = time.Millisecond
+	defer func() { criticalRetryDelay = oldDelay }()
+	done := make(chan struct{})
+	go func() {
+		hub.criticalNotifyAddress(transport.Address{Transport: "mx", ChatID: "2"}, "outbox", errors.New("broken"))
+		close(done)
+	}()
+	select {
+	case <-client.sent:
+	case <-time.After(time.Second):
+		t.Fatal("initial retry did not run")
+	}
+	if err := cfg.SetDisabledTransports([]string{"mx"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("critical retry continued after disable")
+	}
+}
+
+func TestCriticalRetryStopsWhenTransportIsUnavailable(t *testing.T) {
+	client := &testTransport{err: errors.New("down"), sent: make(chan struct{}, 1)}
+	var available atomic.Bool
+	available.Store(true)
+	hub := &transportHub{
+		clients:   map[string]transport.Client{"mx": client},
+		available: func(string) bool { return available.Load() },
+	}
+	oldDelay := criticalRetryDelay
+	criticalRetryDelay = time.Millisecond
+	defer func() { criticalRetryDelay = oldDelay }()
+	done := make(chan struct{})
+	go func() {
+		hub.criticalNotifyAddress(transport.Address{Transport: "mx", ChatID: "2"}, "outbox", errors.New("broken"))
+		close(done)
+	}()
+	select {
+	case <-client.sent:
+	case <-time.After(time.Second):
+		t.Fatal("initial retry did not run")
+	}
+	available.Store(false)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("critical retry continued after transport became unavailable")
+	}
+}
+
+func TestPartialActionStartFailureStillDeliversFinalResult(t *testing.T) {
+	tgClient := &testTransport{err: errors.New("temporary")}
+	mxClient := &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient, "mx": mxClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hub := &transportHub{
+		cfg:     &config.Config{AllowedUsers: []int64{1}, MaxAllowedUsers: []int64{2}},
+		clients: clients, out: store,
+	}
+	started := sendActionStart(hub, true, "starting")
+	if len(started) != 2 {
+		t.Fatalf("tracked starts = %d, want 2", len(started))
+	}
+	tgClient.err = nil
+	editActionMessages(hub, started, true, "finished")
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tgClient.messages[len(tgClient.messages)-1].Text; got != "finished" {
+		t.Fatalf("Telegram final result = %q", got)
+	}
+}
+
+func (t *testTransport) Edit(context.Context, string, string, string, string) error {
+	return t.editErr
+}
+
+func TestActionEditFailureDeliversFinalResultFromOutbox(t *testing.T) {
+	client := &testTransport{editErr: errors.New("edit failed")}
+	clients := map[string]transport.Client{"mx": client}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hub := &transportHub{clients: clients, out: store}
+	address := transport.Address{Transport: "mx", ChatID: "2"}
+	editActionMessages(hub, []actionMessage{{address: address, messageID: "started"}}, true, "finished")
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.messages) != 1 || client.messages[0].Text != "finished" {
+		t.Fatalf("final deliveries = %#v", client.messages)
+	}
+}
+
+func TestSystemNotificationBroadcastsAndRepliesOnlyAtOrigin(t *testing.T) {
+	tgClient, mxClient := &testTransport{}, &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient, "mx": mxClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{AllowedUsers: []int64{1}, MaxAllowedUsers: []int64{2}}
+	hub := &transportHub{cfg: cfg, clients: clients, out: store}
+	origin := &transport.Message{Address: transport.Address{Transport: "mx", ChatID: "2"}, MessageID: "source"}
+	hub.notify(false, "🔒 locked", origin)
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tgClient.messages[0].MessageID; got != "" {
+		t.Fatalf("Telegram reply = %q, want empty", got)
+	}
+	if got := mxClient.messages[0].MessageID; got != "source" {
+		t.Fatalf("MAX reply = %q, want source", got)
+	}
+}
+
+func TestSystemNotificationAlsoRepliesToNonDMOrigin(t *testing.T) {
+	tgClient := &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hub := &transportHub{cfg: &config.Config{AllowedUsers: []int64{1}}, clients: clients, out: store}
+	origin := &transport.Message{Address: transport.Address{Transport: "tg", ChatID: "-100"}, MessageID: "9"}
+	hub.notify(false, "🔒 locked", origin)
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tgClient.messages) != 2 || tgClient.messages[1].Address.ChatID != "-100" || tgClient.messages[1].MessageID != "9" {
+		t.Fatalf("deliveries = %#v", tgClient.messages)
+	}
+}
+
+func TestTransportsCannotDisableCurrentOrLastAndPersistsOff(t *testing.T) {
+	t.Setenv("PICOMAN_CONFIG_DIR", t.TempDir())
+	cfg := config.Default()
+	cfg.TelegramToken, cfg.AllowedUsers = "tg", []int64{1}
+	cfg.MaxToken, cfg.MaxAllowedUsers = "mx", []int64{2}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	clients := map[string]transport.Client{"tg": &testTransport{}, "mx": &testTransport{}}
+	hub := &transportHub{cfg: cfg, clients: clients}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr := newTransportManager(ctx, hub, nil, nil)
+	origin := &transport.Message{Address: transport.Address{Transport: "tg", ChatID: "1"}}
+	c := cmdCtx{cfg: cfg, hub: hub, mgr: mgr, origin: origin}
+	if _, err := cmdTransports(c, []string{"transports", "off", "tg"}); err == nil || !strings.Contains(err.Error(), "carrying") {
+		t.Fatalf("disable current error = %v", err)
+	}
+	if _, err := cmdTransports(c, []string{"transports", "off", "mx"}); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TransportDisabled("mx") {
+		t.Fatal("MAX was not disabled")
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.TransportDisabled("mx") {
+		t.Fatal("disabled transport was not persisted")
+	}
+	if _, err := cmdTransports(c, []string{"transports", "off", "tg"}); err == nil {
+		t.Fatal("last enabled transport was disabled")
+	}
+}
+
+func TestConcurrentTransportDisableKeepsOneEnabled(t *testing.T) {
+	t.Setenv("PICOMAN_CONFIG_DIR", t.TempDir())
+	cfg := config.Default()
+	cfg.TelegramToken, cfg.AllowedUsers = "tg", []int64{1}
+	cfg.MaxToken, cfg.MaxAllowedUsers = "mx", []int64{2}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	clients := map[string]transport.Client{"tg": &testTransport{}, "mx": &testTransport{}}
+	hub := &transportHub{cfg: cfg, clients: clients}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := newTransportManager(ctx, hub, nil, nil)
+	requests := []cmdCtx{
+		{cfg: cfg, hub: hub, mgr: mgr, origin: &transport.Message{Address: transport.Address{Transport: "tg", ChatID: "1"}}},
+		{cfg: cfg, hub: hub, mgr: mgr, origin: &transport.Message{Address: transport.Address{Transport: "mx", ChatID: "2"}}},
+	}
+	args := [][]string{{"transports", "off", "mx"}, {"transports", "off", "tg"}}
+	errs := make(chan error, 2)
+	for i := range requests {
+		go func(i int) { _, err := cmdTransports(requests[i], args[i]); errs <- err }(i)
+	}
+	failures := 0
+	for range requests {
+		if <-errs != nil {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("failed disables = %d, want 1", failures)
+	}
+	if enabledTransportCount(cfg, clients) != 1 {
+		t.Fatalf("enabled transports = %d, want 1", enabledTransportCount(cfg, clients))
+	}
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabledTransportCount(loaded, clients) != 1 {
+		t.Fatalf("persisted enabled transports = %d, want 1", enabledTransportCount(loaded, clients))
+	}
+}
+
+func TestPermanentHandshakeFailureIsVisibleAndExcludedFromBroadcast(t *testing.T) {
+	tgClient, mxClient := &testTransport{}, &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient, "mx": mxClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{AllowedUsers: []int64{1}, MaxAllowedUsers: []int64{2}}
+	hub := &transportHub{cfg: cfg, clients: clients, out: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := newTransportManager(ctx, hub, nil, nil)
+	hub.available = mgr.isRoutable
+	mgr.handshakes["mx"] = func(context.Context) error {
+		return &transport.APIError{Platform: "max", Code: 401, Description: "unauthorized"}
+	}
+	mgr.start("mx")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && mgr.failure("mx") == "" {
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.failure("mx") == "" {
+		t.Fatal("permanent handshake failure was not recorded")
+	}
+	if !strings.Contains(transportsText(cfg, clients, mgr), "mx — unavailable") {
+		t.Fatalf("status = %q", transportsText(cfg, clients, mgr))
+	}
+	if err := store.SendOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tgClient.messages) != 1 {
+		t.Fatalf("Telegram notifications = %d, want 1", len(tgClient.messages))
+	}
+	if len(mxClient.messages) != 0 {
+		t.Fatal("failed transport received its own failure broadcast")
+	}
+}
+
+func TestOutboxWaitsForSuccessfulHandshake(t *testing.T) {
+	mxClient := &testTransport{}
+	clients := map[string]transport.Client{"mx": mxClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{MaxAllowedUsers: []int64{2}}
+	hub := &transportHub{cfg: cfg, clients: clients, out: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := newTransportManager(ctx, hub, nil, nil)
+	hub.available = mgr.isRoutable
+	store.SetTransportEnabled(mgr.isReady)
+	mgr.handshakes["mx"] = func(context.Context) error {
+		return &transport.APIError{Platform: "max", Code: 401, Description: "unauthorized"}
+	}
+	if err := store.EnqueueTo(transport.Address{Transport: "mx", ChatID: "2"}, "", "", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	go store.Run(ctx)
+	mgr.start("mx")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && mgr.failure("mx") == "" {
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.failure("mx") == "" {
+		t.Fatal("permanent handshake failure was not recorded")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(mxClient.messages) != 0 {
+		t.Fatal("pending row was attempted before a successful handshake")
+	}
+	cancel()
+	select {
+	case <-store.Done():
+	case <-time.After(time.Second):
+		t.Fatal("outbox did not stop")
+	}
+}
+
+func TestPollExitPreservesReadinessOnlyForDaemonFlush(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cancel    bool
+		wantReady bool
+	}{
+		{name: "unexpected exit", wantReady: false},
+		{name: "daemon shutdown", cancel: true, wantReady: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			mgr := &transportManager{
+				ctx: ctx, cancel: map[string]context.CancelFunc{"mx": func() {}},
+				pollGen: map[string]uint64{"mx": 7}, ready: map[string]bool{"mx": true},
+				failed: map[string]string{},
+			}
+			mgr.finishPoll("mx", 7)
+			if got := mgr.isReady("mx"); got != tc.wantReady {
+				t.Fatalf("ready = %v, want %v", got, tc.wantReady)
+			}
+		})
+	}
+}
+
+func TestDaemonShutdownReadinessAllowsFlush(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr := &transportManager{
+		ctx: ctx, cancel: map[string]context.CancelFunc{"mx": func() {}},
+		pollGen: map[string]uint64{"mx": 7}, ready: map[string]bool{"mx": true},
+		failed: map[string]string{},
+	}
+	mgr.finishPoll("mx", 7)
+	client := &testTransport{}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", map[string]transport.Client{"mx": client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.SetTransportEnabled(mgr.isReady)
+	if err := store.EnqueueTo(transport.Address{Transport: "mx", ChatID: "2"}, "", "", "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	flushCtx, stopFlush := context.WithTimeout(context.Background(), time.Second)
+	defer stopFlush()
+	store.Flush(flushCtx)
+	if len(client.messages) != 1 || client.messages[0].Text != "stopped" {
+		t.Fatalf("shutdown flush deliveries = %#v", client.messages)
+	}
+}
+
+func TestPermanentPollFailureIsVisibleAndExcludedFromBroadcast(t *testing.T) {
+	for _, failedName := range []string{"tg", "mx"} {
+		t.Run(failedName, func(t *testing.T) {
+			tgClient, mxClient := &testTransport{}, &testTransport{}
+			clients := map[string]transport.Client{"tg": tgClient, "mx": mxClient}
+			store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			cfg := &config.Config{AllowedUsers: []int64{1}, MaxAllowedUsers: []int64{2}}
+			hub := &transportHub{cfg: cfg, clients: clients, out: store}
+			mgr := newTransportManager(context.Background(), hub, nil, nil)
+			hub.available = mgr.isRoutable
+			apiName := map[string]string{"tg": "telegram", "mx": "max"}[failedName]
+			if !mgr.markPollUnavailable(failedName, &transport.APIError{Platform: apiName, Code: 401, Description: "unauthorized"}) {
+				t.Fatal("permanent poll failure was treated as retryable")
+			}
+			if mgr.markPollUnavailable(failedName, &transport.APIError{Platform: apiName, Code: 409, Description: "conflict"}) {
+				t.Fatal("poll conflict was treated as a credential failure")
+			}
+			if mgr.failure(failedName) == "" {
+				t.Fatal("permanent poll failure was not recorded")
+			}
+			if !strings.Contains(transportsText(cfg, clients, mgr), failedName+" — unavailable") {
+				t.Fatalf("status = %q", transportsText(cfg, clients, mgr))
+			}
+			if err := store.SendOne(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			failedClient := map[string]*testTransport{"tg": tgClient, "mx": mxClient}[failedName]
+			if len(failedClient.messages) != 0 {
+				t.Fatal("failed transport received its own failure broadcast")
+			}
+		})
+	}
+}
 
 func TestNormalizeCommandFieldsSplitsUnderscoreArguments(t *testing.T) {
 	name, fields := normalizeCommandFields([]string{"/unlock_1h"})
@@ -399,15 +894,32 @@ func TestRunGroupRejectsEmptyGroupAndLockedKey(t *testing.T) {
 
 func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
 	audit := newAuditState("chat")
-	reply, err := cmdLogLevel(cmdCtx{audit: audit}, []string{"/loglevel", "all"})
+	tgClient, mxClient := &testTransport{}, &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient, "mx": mxClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hub := &transportHub{cfg: &config.Config{AllowedUsers: []int64{1}, MaxAllowedUsers: []int64{2}}, clients: clients, out: store}
+	origin := &transport.Message{Address: transport.Address{Transport: "mx", ChatID: "2"}, MessageID: "source"}
+	reply, err := cmdLogLevel(cmdCtx{audit: audit, hub: hub, origin: origin}, []string{"/loglevel", "all"})
 	if err != nil {
 		t.Fatalf("cmdLogLevel returned error: %v", err)
 	}
-	if reply.text != "⚙️ loglevel all" {
-		t.Fatalf("reply = %q, want loglevel confirmation", reply.text)
+	if reply.text != "" {
+		t.Fatalf("reply = %q, want broadcast-only confirmation", reply.text)
 	}
 	if got := audit.LogLevel(); got != "all" {
 		t.Fatalf("LogLevel = %q, want all", got)
+	}
+	for range 2 {
+		if err := store.SendOne(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(tgClient.messages) != 1 || len(mxClient.messages) != 1 {
+		t.Fatalf("broadcast counts = tg:%d mx:%d", len(tgClient.messages), len(mxClient.messages))
 	}
 }
 

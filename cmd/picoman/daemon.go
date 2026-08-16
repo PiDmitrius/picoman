@@ -24,28 +24,64 @@ import (
 
 	"picoman/internal/agent"
 	"picoman/internal/config"
+	maxclient "picoman/internal/max"
 	"picoman/internal/outbox"
 	"picoman/internal/tg"
+	"picoman/internal/transport"
 )
+
+type transportHub struct {
+	cfg       *config.Config
+	clients   map[string]transport.Client
+	out       *outbox.Store
+	available func(string) bool
+}
+
+var criticalRetryDelay = 5 * time.Second
+
+func (h *transportHub) destinations() []transport.Address {
+	var result []transport.Address
+	if h.clients["tg"] != nil && !h.cfg.TransportDisabled("tg") && (h.available == nil || h.available("tg")) {
+		for _, id := range h.cfg.AllowedUsers {
+			result = append(result, transport.Address{Transport: "tg", ChatID: strconv.FormatInt(id, 10)})
+		}
+	}
+	if h.clients["mx"] != nil && !h.cfg.TransportDisabled("mx") && (h.available == nil || h.available("mx")) {
+		for _, id := range h.cfg.MaxAllowedUsers {
+			result = append(result, transport.Address{Transport: "mx", ChatID: strconv.FormatInt(id, 10)})
+		}
+	}
+	return result
+}
 
 func runDaemon() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	if cfg.TelegramToken == "" {
-		log.Fatal("tg_token is required; run picoman setup")
+	clients := make(map[string]transport.Client)
+	var bot *tg.Client
+	if cfg.TelegramToken != "" && len(cfg.AllowedUsers) > 0 {
+		bot = tg.New(cfg.TelegramToken)
+		clients["tg"] = bot
 	}
-	if len(cfg.AllowedUsers) == 0 {
-		log.Fatal("tg_allowed_users is required; run picoman setup")
+	var maxBot *maxclient.Client
+	if cfg.MaxToken != "" && len(cfg.MaxAllowedUsers) > 0 {
+		maxBot = maxclient.New(cfg.MaxToken)
+		clients["mx"] = maxBot
 	}
-	bot := tg.New(cfg.TelegramToken)
+	if len(clients) == 0 {
+		log.Fatal("at least one configured transport is required; run picoman setup")
+	}
+	if enabledTransportCount(cfg, clients) == 0 {
+		log.Fatal("at least one configured transport must be enabled")
+	}
 	if err := config.LoadHostDB(cfg); err != nil {
-		criticalNotifyUsers(cfg, bot, "hostdb", err)
+		criticalNotifyConfigured(cfg, clients, "hostdb", err)
 		log.Fatalf("load host db: %v", err)
 	}
 	if err := os.MkdirAll(cfg.WorkDir, 0o700); err != nil {
-		criticalNotifyUsers(cfg, bot, "workdir", err)
+		criticalNotifyConfigured(cfg, clients, "workdir", err)
 		log.Fatalf("create work dir: %v", err)
 	}
 
@@ -53,82 +89,50 @@ func runDaemon() {
 	defer stop()
 
 	st := agent.New(cfg.KeyPath, config.MaxTTL(cfg))
-	out, err := outbox.Open(config.DBPath(), bot)
+	out, err := outbox.Open(config.DBPath(), clients)
 	if err != nil {
-		criticalNotifyUsers(cfg, bot, "outbox", err)
+		criticalNotifyConfigured(cfg, clients, "outbox", err)
 		log.Fatalf("open outbox: %v", err)
 	}
 	defer out.Close()
-	out.SetAlertSink(func(text string) {
-		go func() {
-			for _, uid := range cfg.AllowedUsers {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				_ = bot.SendMessage(ctx, uid, text)
-				cancel()
-			}
-		}()
-	})
+	hub := &transportHub{cfg: cfg, clients: clients, out: out}
+	out.SetAlertSink(func(text string) { go hub.criticalNotify("outbox", errors.New(text)) })
+	audit := newAuditState(cfg.LogLevel)
+	manager := newTransportManager(ctx, hub, st, audit)
+	hub.available = manager.isRoutable
+	out.SetTransportEnabled(func(name string) bool { return !cfg.TransportDisabled(name) && manager.isReady(name) })
 
 	outboxCtx, stopOutbox := context.WithCancel(context.Background())
 	defer stopOutbox()
 	go out.Run(outboxCtx)
-	audit := newAuditState(cfg.LogLevel)
-	go runControl(ctx, cfg, st, out, bot, audit)
-	go watchUnlockExpiry(ctx, st, out, cfg, bot)
+	go runControl(ctx, cfg, st, hub, audit)
+	go watchUnlockExpiry(ctx, st, hub)
 
 	marker := readRestartMarker()
 	if marker.Reason == "update" {
-		notify(out, cfg, bot, false, infoText(updateLifecycleText(marker)))
+		hub.notify(false, infoText(updateLifecycleText(marker)), nil)
 	} else {
-		notify(out, cfg, bot, false, infoText(lifecycleText("started")))
+		hub.notify(false, infoText(lifecycleText("started")), nil)
 	}
 
 	// Auto-unseal in a goroutine so startup is not blocked on a potentially
 	// slow or interactive unseal command. Notifies separately when done.
-	go startupAutoUnseal(ctx, cfg, st, out, bot)
+	go startupAutoUnseal(ctx, cfg, st, hub)
 
 	// Menu is decorative; publish it in the background so a slow setMyCommands
 	// never delays the Telegram control loop.
-	go func() {
-		if err := bot.SetMyCommands(ctx, menuCommands); err != nil {
-			log.Printf("set commands: %v", err)
-		}
-	}()
-
-	offset := out.TelegramOffset()
-	backoff := time.Second
-	for {
-		updates, err := bot.GetUpdates(ctx, offset)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
+	if bot != nil {
+		go func() {
+			if err := bot.SetMyCommands(ctx, menuCommands); err != nil {
+				log.Printf("set commands: %v", err)
 			}
-			log.Printf("getUpdates: %v (retry in %s)", err, backoff)
-			if !sleepWithCtx(ctx, backoff) {
-				break
-			}
-			backoff *= 2
-			if backoff > time.Minute {
-				backoff = time.Minute
-			}
-			continue
-		}
-		backoff = time.Second
-		for _, upd := range updates {
-			offset = upd.UpdateID + 1
-			if upd.Message.Text == "" {
-				continue
-			}
-			handleMessage(ctx, out, cfg, st, audit, bot, upd.Message)
-		}
-		if len(updates) > 0 {
-			// SetTelegramOffset emits its own alert (via outbox sink) on error.
-			_ = out.SetTelegramOffset(offset)
-		}
+		}()
 	}
+	manager.startConfigured()
+	<-ctx.Done()
 
 	st.Seal()
-	notify(out, cfg, bot, false, infoText(lifecycleText("stopped")))
+	hub.notify(false, infoText(lifecycleText("stopped")), nil)
 	// Stop the Run goroutine first so it doesn't race Flush on next().
 	stopOutbox()
 	<-out.Done()
@@ -139,6 +143,275 @@ func lifecycleText(event string) string {
 	return "picoman " + version + " " + event
 }
 
+type transportManager struct {
+	ctx           context.Context
+	hub           *transportHub
+	st            *agent.State
+	audit         *auditState
+	mu            sync.Mutex
+	toggleMu      sync.Mutex
+	cancel        map[string]context.CancelFunc
+	connectCancel map[string]context.CancelFunc
+	connectGen    map[string]uint64
+	pollGen       map[string]uint64
+	nextGen       uint64
+	ready         map[string]bool
+	failed        map[string]string
+	handshakes    map[string]func(context.Context) error
+}
+
+func newTransportManager(ctx context.Context, hub *transportHub, st *agent.State, audit *auditState) *transportManager {
+	m := &transportManager{ctx: ctx, hub: hub, st: st, audit: audit, cancel: map[string]context.CancelFunc{}, connectCancel: map[string]context.CancelFunc{}, connectGen: map[string]uint64{}, pollGen: map[string]uint64{}, ready: map[string]bool{}, failed: map[string]string{}, handshakes: map[string]func(context.Context) error{}}
+	if bot, ok := hub.clients["tg"].(*tg.Client); ok {
+		m.handshakes["tg"] = func(ctx context.Context) error { _, err := bot.GetMe(ctx); return err }
+	}
+	if bot, ok := hub.clients["mx"].(*maxclient.Client); ok {
+		m.handshakes["mx"] = func(ctx context.Context) error {
+			if _, err := bot.GetMe(ctx); err != nil {
+				return err
+			}
+			return bot.Drain(ctx)
+		}
+	}
+	return m
+}
+
+func (m *transportManager) isRoutable(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failed[name] == ""
+}
+
+func (m *transportManager) isReady(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ready[name] && m.failed[name] == ""
+}
+
+func (m *transportManager) failure(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failed[name]
+}
+
+func (m *transportManager) startConfigured() {
+	for _, name := range []string{"tg", "mx"} {
+		if m.hub.clients[name] != nil && !m.hub.cfg.TransportDisabled(name) {
+			m.start(name)
+		}
+	}
+}
+
+func (m *transportManager) start(name string) {
+	m.mu.Lock()
+	if m.cancel[name] != nil || m.connectCancel[name] != nil || m.hub.clients[name] == nil || m.hub.cfg.TransportDisabled(name) {
+		m.mu.Unlock()
+		return
+	}
+	m.nextGen++
+	gen := m.nextGen
+	connectCtx, connectCancel := context.WithCancel(m.ctx)
+	m.connectCancel[name] = connectCancel
+	m.connectGen[name] = gen
+	m.ready[name] = false
+	delete(m.failed, name)
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			if m.connectGen[name] == gen {
+				delete(m.connectCancel, name)
+				delete(m.connectGen, name)
+			}
+			m.mu.Unlock()
+		}()
+		backoff := time.Second
+		for connectCtx.Err() == nil && !m.hub.cfg.TransportDisabled(name) {
+			ctx, cancel := context.WithTimeout(connectCtx, 45*time.Second)
+			err := m.handshake(ctx, name)
+			cancel()
+			if err == nil {
+				m.mu.Lock()
+				delete(m.failed, name)
+				m.mu.Unlock()
+				m.startPoll(name, gen)
+				return
+			}
+			if m.markUnavailable(name, "handshake", err) {
+				return
+			}
+			log.Printf("transport %s handshake failed: %v (retry in %s)", name, err, backoff)
+			if !sleepWithCtx(connectCtx, backoff) {
+				return
+			}
+			if backoff < time.Minute {
+				backoff *= 2
+			}
+		}
+	}()
+}
+
+func (m *transportManager) markUnavailable(name, phase string, err error) bool {
+	var apiErr *transport.APIError
+	if !errors.As(err, &apiErr) || apiErr.IsRetryable() {
+		return false
+	}
+	reason := shortError(err)
+	m.mu.Lock()
+	m.ready[name] = false
+	m.failed[name] = reason
+	m.mu.Unlock()
+	log.Printf("transport %s disabled by permanent %s error: %v", name, phase, err)
+	m.hub.notify(false, errorText("transport "+name+" unavailable: "+reason), nil)
+	return true
+}
+
+func (m *transportManager) markPollUnavailable(name string, err error) bool {
+	var apiErr *transport.APIError
+	if !errors.As(err, &apiErr) || (apiErr.Code != 401 && apiErr.Code != 403) {
+		return false
+	}
+	return m.markUnavailable(name, "poll", err)
+}
+
+func (m *transportManager) handshake(ctx context.Context, name string) error {
+	fn := m.handshakes[name]
+	if fn == nil {
+		return fmt.Errorf("transport %q has no handshake", name)
+	}
+	return fn(ctx)
+}
+
+func (m *transportManager) startPoll(name string, gen uint64) {
+	m.mu.Lock()
+	if m.hub.cfg.TransportDisabled(name) || m.cancel[name] != nil || m.connectGen[name] != gen {
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancel[name] = cancel
+	m.pollGen[name] = gen
+	m.ready[name] = true
+	m.mu.Unlock()
+	go func() {
+		defer m.finishPoll(name, gen)
+		if name == "tg" {
+			m.pollTelegram(ctx)
+		} else {
+			m.pollMAX(ctx)
+		}
+	}()
+}
+
+func (m *transportManager) finishPoll(name string, gen uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pollGen[name] != gen {
+		return
+	}
+	delete(m.cancel, name)
+	delete(m.pollGen, name)
+	if m.ctx.Err() == nil {
+		m.ready[name] = false
+	}
+}
+
+func (m *transportManager) stop(name string) {
+	m.mu.Lock()
+	m.ready[name] = false
+	if cancel := m.connectCancel[name]; cancel != nil {
+		cancel()
+		delete(m.connectCancel, name)
+		delete(m.connectGen, name)
+	}
+	if cancel := m.cancel[name]; cancel != nil {
+		cancel()
+		delete(m.cancel, name)
+		delete(m.pollGen, name)
+	}
+	m.mu.Unlock()
+}
+
+func (m *transportManager) pollTelegram(ctx context.Context) {
+	bot := m.hub.clients["tg"].(*tg.Client)
+	offset := m.hub.out.TelegramOffset()
+	backoff := time.Second
+	for ctx.Err() == nil {
+		updates, err := bot.GetUpdates(ctx, offset)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if m.markPollUnavailable("tg", err) {
+				return
+			}
+			log.Printf("tg getUpdates: %v (retry in %s)", err, backoff)
+			if !sleepWithCtx(ctx, backoff) {
+				return
+			}
+			if backoff < time.Minute {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
+		for _, update := range updates {
+			offset = update.UpdateID + 1
+			msg := update.Message
+			if msg.Text != "" {
+				handleMessage(ctx, m.hub, m.hub.cfg, m.st, m.audit, m, transport.Message{
+					Address:   transport.Address{Transport: "tg", ChatID: strconv.FormatInt(msg.Chat.ID, 10)},
+					MessageID: strconv.FormatInt(msg.MessageID, 10), SenderID: msg.From.ID, Username: msg.From.Username, Text: msg.Text,
+				})
+			}
+		}
+		if len(updates) > 0 {
+			_ = m.hub.out.SetTelegramOffset(offset)
+		}
+	}
+}
+
+func (m *transportManager) pollMAX(ctx context.Context) {
+	bot := m.hub.clients["mx"].(*maxclient.Client)
+	backoff := time.Second
+	for ctx.Err() == nil {
+		updates, err := bot.GetUpdates(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if m.markPollUnavailable("mx", err) {
+				return
+			}
+			log.Printf("mx getUpdates: %v (retry in %s)", err, backoff)
+			if !sleepWithCtx(ctx, backoff) {
+				return
+			}
+			if backoff < time.Minute {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
+		for _, update := range updates {
+			if msg, ok := maxInboundMessage(update); ok {
+				handleMessage(ctx, m.hub, m.hub.cfg, m.st, m.audit, m, msg)
+			}
+		}
+	}
+}
+
+func maxInboundMessage(update maxclient.Update) (transport.Message, bool) {
+	if update.Type != "message_created" || update.Message.Body.Text == "" || update.Message.Recipient.ChatType != "dialog" {
+		return transport.Message{}, false
+	}
+	return transport.Message{
+		Address:   transport.Address{Transport: "mx", ChatID: strconv.FormatInt(update.Message.Sender.ID, 10)},
+		MessageID: update.Message.Body.ID, SenderID: update.Message.Sender.ID,
+		Username: update.Message.Sender.Username, Text: update.Message.Body.Text,
+	}, true
+}
+
 func updateLifecycleText(marker restartMarker) string {
 	if marker.From != "" && marker.To != "" {
 		return "picoman updated " + marker.From + " -> " + marker.To
@@ -146,124 +419,133 @@ func updateLifecycleText(marker restartMarker) string {
 	return "picoman " + version + " updated"
 }
 
-// notify broadcasts text to all allowed users through the outbox.
-// On enqueue failure (outbox itself broken) falls back to direct send.
-func notify(out *outbox.Store, cfg *config.Config, bot *tg.Client, html bool, text string) {
-	enqueue := out.Enqueue
+func (h *transportHub) notify(html bool, text string, origin *transport.Message) {
+	format := ""
 	if html {
-		enqueue = out.EnqueueHTML
+		format = "html"
 	}
-	for _, userID := range cfg.AllowedUsers {
-		if err := enqueue(userID, text); err != nil {
-			log.Printf("enqueue notify user=%d: %v", userID, err)
-			go criticalNotifyUser(userID, bot, "outbox", err)
+	originSent := false
+	enqueue := func(address transport.Address, replyTo string) {
+		if err := h.out.EnqueueTo(address, replyTo, format, text); err != nil {
+			log.Printf("enqueue notify transport=%s chat=%s: %v", address.Transport, address.ChatID, err)
+			go h.criticalNotifyAddress(address, "outbox", err)
 		}
+	}
+	for _, address := range h.destinations() {
+		replyTo := ""
+		if origin != nil && address == origin.Address {
+			replyTo = origin.MessageID
+			originSent = true
+		}
+		enqueue(address, replyTo)
+	}
+	if origin != nil && !originSent {
+		enqueue(origin.Address, origin.MessageID)
 	}
 }
 
 type actionMessage struct {
-	chatID    int64
-	messageID int64
-	replyToID int64
+	address   transport.Address
+	messageID string
+	replyToID string
 }
 
-func sendActionStart(cfg *config.Config, bot *tg.Client, html bool, text string) []actionMessage {
-	sent := make([]actionMessage, 0, len(cfg.AllowedUsers))
-	for _, userID := range cfg.AllowedUsers {
-		msg, err := sendDirectMessage(bot, userID, 0, html, text)
+func sendActionStart(hub *transportHub, html bool, text string) []actionMessage {
+	sent := make([]actionMessage, 0, len(hub.destinations()))
+	for _, address := range hub.destinations() {
+		msg, err := sendDirectMessage(hub.clients[address.Transport], address, "", html, text)
 		if err != nil {
-			log.Printf("send action start user=%d: %v", userID, err)
+			log.Printf("send action start transport=%s chat=%s: %v", address.Transport, address.ChatID, err)
+			sent = append(sent, actionMessage{address: address})
 			continue
 		}
-		sent = append(sent, actionMessage{chatID: userID, messageID: msg.MessageID})
+		sent = append(sent, actionMessage{address: address, messageID: msg})
 	}
 	return sent
 }
 
-func sendActionReplyStart(bot *tg.Client, msg tg.Message, html bool, text string) []actionMessage {
-	sent, err := sendDirectMessage(bot, msg.Chat.ID, msg.MessageID, html, text)
+func sendActionReplyStart(client transport.Client, msg transport.Message, html bool, text string) []actionMessage {
+	sent, err := sendDirectMessage(client, msg.Address, msg.MessageID, html, text)
 	if err != nil {
-		log.Printf("send action reply start chat=%d: %v", msg.Chat.ID, err)
+		log.Printf("send action reply start transport=%s chat=%s: %v", msg.Address.Transport, msg.Address.ChatID, err)
 		return nil
 	}
-	return []actionMessage{{chatID: msg.Chat.ID, messageID: sent.MessageID, replyToID: msg.MessageID}}
+	return []actionMessage{{address: msg.Address, messageID: sent, replyToID: msg.MessageID}}
 }
 
-func editActionMessages(out *outbox.Store, bot *tg.Client, messages []actionMessage, html bool, text string) {
+func editActionMessages(hub *transportHub, messages []actionMessage, html bool, text string) {
 	if len(messages) == 0 {
 		return
 	}
 	for _, msg := range messages {
-		if err := editDirectMessage(bot, msg.chatID, msg.messageID, html, text); err != nil {
-			log.Printf("edit action message chat=%d message=%d: %v", msg.chatID, msg.messageID, err)
-			if msg.replyToID > 0 {
-				enqueueReplyTo(out, bot, msg.chatID, msg.replyToID, cmdReply{text: text, html: html})
-			} else {
-				enqueueNotify(out, bot, msg.chatID, html, text)
-			}
+		client := hub.clients[msg.address.Transport]
+		if msg.messageID == "" || client == nil {
+			enqueueReplyTo(hub, msg.address, msg.replyToID, cmdReply{text: text, html: html})
+			continue
+		}
+		if err := editDirectMessage(client, msg.address, msg.messageID, html, text); err != nil {
+			log.Printf("edit action transport=%s chat=%s: %v", msg.address.Transport, msg.address.ChatID, err)
+			enqueueReplyTo(hub, msg.address, msg.replyToID, cmdReply{text: text, html: html})
 		}
 	}
 }
 
-func sendDirectMessage(bot *tg.Client, chatID, replyToID int64, html bool, text string) (tg.Message, error) {
+func sendDirectMessage(client transport.Client, address transport.Address, replyToID string, html bool, text string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	switch {
-	case html && replyToID > 0:
-		return bot.SendHTMLReplyResult(ctx, chatID, replyToID, text)
-	case html:
-		return bot.SendHTMLResult(ctx, chatID, text)
-	case replyToID > 0:
-		return bot.SendReplyResult(ctx, chatID, replyToID, text)
-	default:
-		return bot.SendMessageResult(ctx, chatID, text)
+	format := ""
+	if html {
+		format = "html"
 	}
+	return client.Send(ctx, address.ChatID, replyToID, text, format)
 }
 
-func editDirectMessage(bot *tg.Client, chatID, messageID int64, html bool, text string) error {
+func editDirectMessage(client transport.Client, address transport.Address, messageID string, html bool, text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	format := ""
 	if html {
-		return bot.EditHTMLMessage(ctx, chatID, messageID, text)
+		format = "html"
 	}
-	return bot.EditMessage(ctx, chatID, messageID, text)
+	return client.Edit(ctx, address.ChatID, messageID, text, format)
 }
 
-func enqueueNotify(out *outbox.Store, bot *tg.Client, userID int64, html bool, text string) {
-	if text == "" {
-		return
-	}
-	var err error
-	if html {
-		err = out.EnqueueHTML(userID, text)
-	} else {
-		err = out.Enqueue(userID, text)
-	}
-	if err != nil {
-		log.Printf("enqueue notify user=%d: %v", userID, err)
-		go criticalNotifyUser(userID, bot, "outbox", err)
-	}
-}
-
-func criticalNotifyUsers(cfg *config.Config, bot *tg.Client, name string, err error) {
-	for _, userID := range cfg.AllowedUsers {
-		criticalNotifyUser(userID, bot, name, err)
-	}
+func criticalNotifyConfigured(cfg *config.Config, clients map[string]transport.Client, name string, err error) {
+	h := &transportHub{cfg: cfg, clients: clients}
+	h.criticalNotify(name, err)
 }
 
 // criticalNotifyUser sends a direct (non-outbox) message and retries forever.
 // Used only when the outbox itself failed and we need to bypass it.
-func criticalNotifyUser(userID int64, bot *tg.Client, name string, err error) {
+func (h *transportHub) criticalNotify(name string, err error) {
+	var wg sync.WaitGroup
+	for _, address := range h.destinations() {
+		wg.Add(1)
+		go func(address transport.Address) {
+			defer wg.Done()
+			h.criticalNotifyAddress(address, name, err)
+		}(address)
+	}
+	wg.Wait()
+}
+
+func (h *transportHub) criticalNotifyAddress(address transport.Address, name string, err error) {
 	text := "❌ " + name + " error: " + shortError(err)
 	for {
+		if h.cfg != nil && h.cfg.TransportDisabled(address.Transport) {
+			return
+		}
+		if h.available != nil && !h.available(address.Transport) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		sendErr := bot.SendMessage(ctx, userID, text)
+		_, sendErr := h.clients[address.Transport].Send(ctx, address.ChatID, "", text, "")
 		cancel()
 		if sendErr == nil {
 			return
 		}
-		log.Printf("critical notify failed user=%d: %v", userID, sendErr)
-		time.Sleep(5 * time.Second)
+		log.Printf("critical notify failed transport=%s chat=%s: %v", address.Transport, address.ChatID, sendErr)
+		time.Sleep(criticalRetryDelay)
 	}
 }
 
@@ -314,33 +596,33 @@ func interactiveUnseal(ctx context.Context, cfg *config.Config) (string, error) 
 // startupAutoUnseal performs the configured auto-unseal in the background.
 // Daemon-startup has no tty, so the default-askpass fallback is intentionally
 // skipped here — if nothing is configured the daemon stays sealed silently.
-func startupAutoUnseal(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client) {
+func startupAutoUnseal(ctx context.Context, cfg *config.Config, st *agent.State, hub *transportHub) {
 	passphrase, err := configuredUnseal(ctx, cfg)
 	if err != nil {
-		notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
+		hub.notify(false, errorText("unseal failed: "+err.Error()), nil)
 		return
 	}
 	if passphrase == "" {
 		return
 	}
 	if err := st.Unseal(passphrase); err != nil {
-		notify(out, cfg, bot, false, errorText("unseal failed: "+err.Error()))
+		hub.notify(false, errorText("unseal failed: "+err.Error()), nil)
 		return
 	}
-	notify(out, cfg, bot, false, unsealText())
-	startupDeveloperAutoUnlock(cfg, st, out, bot)
+	hub.notify(false, unsealText(), nil)
+	startupDeveloperAutoUnlock(cfg, st, hub)
 }
 
-func startupDeveloperAutoUnlock(cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client) {
+func startupDeveloperAutoUnlock(cfg *config.Config, st *agent.State, hub *transportHub) {
 	ttl, ok := developerAutoUnlockTTL(cfg)
 	if !ok {
 		return
 	}
 	if err := st.Unlock(ttl); err != nil {
-		notify(out, cfg, bot, false, errorText("unlock failed: "+err.Error()))
+		hub.notify(false, errorText("unlock failed: "+err.Error()), nil)
 		return
 	}
-	notify(out, cfg, bot, false, unlockedText(st))
+	hub.notify(false, unlockedText(st), nil)
 }
 
 func developerAutoUnlockTTL(cfg *config.Config) (time.Duration, bool) {
@@ -395,7 +677,7 @@ func flushOutbox(out *outbox.Store) {
 	out.Flush(ctx)
 }
 
-func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, cfg *config.Config, bot *tg.Client) {
+func watchUnlockExpiry(ctx context.Context, st *agent.State, hub *transportHub) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -409,16 +691,19 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, out *outbox.Store, 
 		if !st.LockExpired(time.Now()) {
 			continue
 		}
-		notify(out, cfg, bot, false, "🔒 locked")
+		hub.notify(false, "🔒 locked", nil)
 	}
 }
 
 type cmdCtx struct {
-	ctx   context.Context
-	cfg   *config.Config
-	st    *agent.State
-	audit *auditState
-	bot   *tg.Client
+	ctx    context.Context
+	cfg    *config.Config
+	st     *agent.State
+	audit  *auditState
+	bot    *tg.Client
+	hub    *transportHub
+	mgr    *transportManager
+	origin *transport.Message
 }
 
 type cmdReply struct {
@@ -436,31 +721,40 @@ type cmdEntry struct {
 const builtinAllGroup = "all"
 const maxParallelGroupRuns = 16
 
-var commands = map[string]cmdEntry{
-	"start":    {fn: cmdHelp},
-	"help":     {fn: cmdHelp},
-	"status":   {fn: cmdStatus},
-	"hosts":    {fn: cmdHosts},
-	"host":     {fn: cmdHost},
-	"groups":   {fn: cmdGroupList},
-	"group":    {fn: cmdGroup},
-	"unseal":   {fn: cmdUnseal, async: true},
-	"unlock":   {fn: cmdUnlock},
-	"seal":     {fn: cmdSeal},
-	"lock":     {fn: cmdLock},
-	"update":   {fn: cmdUpdate, async: true},
-	"run":      {fn: cmdRun, async: true},
-	"get":      {fn: cmdGet, async: true},
-	"put":      {fn: cmdPut, async: true},
-	"loglevel": {fn: cmdLogLevel},
-	"menu":     {fn: cmdMenu, async: true},
+var commands map[string]cmdEntry
+
+func init() {
+	commands = map[string]cmdEntry{
+		"start":      {fn: cmdHelp},
+		"help":       {fn: cmdHelp},
+		"status":     {fn: cmdStatus},
+		"hosts":      {fn: cmdHosts},
+		"host":       {fn: cmdHost},
+		"groups":     {fn: cmdGroupList},
+		"group":      {fn: cmdGroup},
+		"unseal":     {fn: cmdUnseal, async: true},
+		"unlock":     {fn: cmdUnlock},
+		"seal":       {fn: cmdSeal},
+		"lock":       {fn: cmdLock},
+		"update":     {fn: cmdUpdate, async: true},
+		"run":        {fn: cmdRun, async: true},
+		"get":        {fn: cmdGet, async: true},
+		"put":        {fn: cmdPut, async: true},
+		"loglevel":   {fn: cmdLogLevel},
+		"menu":       {fn: cmdMenu, async: true},
+		"transports": {fn: cmdTransports},
+	}
 }
 
-func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, st *agent.State, audit *auditState, bot *tg.Client, msg tg.Message) {
-	if !config.AllowedSet(cfg)[msg.From.ID] {
+func handleMessage(ctx context.Context, hub *transportHub, cfg *config.Config, st *agent.State, audit *auditState, mgr *transportManager, msg transport.Message) {
+	allowed := config.AllowedSet(cfg)
+	if msg.Address.Transport == "mx" {
+		allowed = config.MaxAllowedSet(cfg)
+	}
+	if !allowed[msg.SenderID] {
 		// Silent drop: replying "denied" leaks bot existence to anyone who
 		// pings the chat. Journal record is enough for forensics.
-		log.Printf("deny user=%d username=%s command=%q", msg.From.ID, msg.From.Username, logCommandName(msg.Text))
+		log.Printf("deny transport=%s user=%d username=%s command=%q", msg.Address.Transport, msg.SenderID, msg.Username, logCommandName(msg.Text))
 		return
 	}
 
@@ -471,31 +765,32 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 	name, fields := normalizeCommandFields(fields)
 
 	if isVersionCommand(name) {
-		go handleInstallVersionMessage(out, bot, msg, tagFromVersionCommand(name))
+		go handleInstallVersionMessage(hub, msg, tagFromVersionCommand(name))
 		return
 	}
 
 	entry, ok := commands[name]
 	if !ok {
-		enqueueReply(out, bot, msg, cmdReply{text: warningText("unknown command\n\n" + botHelpText())})
+		enqueueReply(hub, msg, cmdReply{text: warningText("unknown command\n\n" + botHelpText())})
 		return
 	}
 
-	c := cmdCtx{ctx: ctx, cfg: cfg, st: st, audit: audit, bot: bot}
+	commandCtx := inboundCommandContext(ctx, mgr)
+	c := cmdCtx{ctx: commandCtx, cfg: cfg, st: st, audit: audit, bot: func() *tg.Client { v, _ := hub.clients["tg"].(*tg.Client); return v }(), hub: hub, mgr: mgr, origin: &msg}
 	run := func() {
 		reply, err := entry.fn(c, fields)
 		logCommand(msg, err)
 		if reply.text == "" && err != nil {
 			reply.text = errorText(err.Error())
 		}
-		enqueueReply(out, bot, msg, reply)
+		enqueueReply(hub, msg, reply)
 	}
 	if entry.async {
 		if start := commandStartText(audit, name, fields); start != "" {
 			go func() {
 				startedCh := make(chan []actionMessage, 1)
 				go func() {
-					startedCh <- sendActionReplyStart(bot, msg, true, start)
+					startedCh <- sendActionReplyStart(hub.clients[msg.Address.Transport], msg, true, start)
 				}()
 				reply, err := entry.fn(c, fields)
 				logCommand(msg, err)
@@ -504,10 +799,10 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 				}
 				started := <-startedCh
 				if len(started) > 0 {
-					editActionMessages(out, bot, started, reply.html, reply.text)
+					editActionMessages(hub, started, reply.html, reply.text)
 					return
 				}
-				enqueueReply(out, bot, msg, reply)
+				enqueueReply(hub, msg, reply)
 			}()
 			return
 		}
@@ -515,6 +810,13 @@ func handleMessage(ctx context.Context, out *outbox.Store, cfg *config.Config, s
 		return
 	}
 	run()
+}
+
+func inboundCommandContext(sourceCtx context.Context, mgr *transportManager) context.Context {
+	if mgr != nil {
+		return mgr.ctx
+	}
+	return sourceCtx
 }
 
 func commandStartText(audit *auditState, name string, fields []string) string {
@@ -547,13 +849,13 @@ func commandStartText(audit *auditState, name string, fields []string) string {
 	}
 }
 
-func logCommand(msg tg.Message, err error) {
+func logCommand(msg transport.Message, err error) {
 	name := logCommandName(msg.Text)
 	if err != nil {
-		log.Printf("command error user=%d command=%q err=%v", msg.From.ID, name, err)
+		log.Printf("command error transport=%s user=%d command=%q err=%v", msg.Address.Transport, msg.SenderID, name, err)
 		return
 	}
-	log.Printf("command ok user=%d command=%q", msg.From.ID, name)
+	log.Printf("command ok transport=%s user=%d command=%q", msg.Address.Transport, msg.SenderID, name)
 }
 
 func logCommandName(text string) string {
@@ -565,23 +867,22 @@ func logCommandName(text string) string {
 	return name
 }
 
-func enqueueReply(out *outbox.Store, bot *tg.Client, msg tg.Message, r cmdReply) {
-	enqueueReplyTo(out, bot, msg.Chat.ID, msg.MessageID, r)
+func enqueueReply(hub *transportHub, msg transport.Message, r cmdReply) {
+	enqueueReplyTo(hub, msg.Address, msg.MessageID, r)
 }
 
-func enqueueReplyTo(out *outbox.Store, bot *tg.Client, chatID, replyToID int64, r cmdReply) {
+func enqueueReplyTo(hub *transportHub, address transport.Address, replyToID string, r cmdReply) {
 	if r.text == "" {
 		return
 	}
-	var err error
+	format := ""
 	if r.html {
-		err = out.EnqueueHTMLReply(chatID, replyToID, r.text)
-	} else {
-		err = out.EnqueueReply(chatID, replyToID, r.text)
+		format = "html"
 	}
+	err := hub.out.EnqueueTo(address, replyToID, format, r.text)
 	if err != nil {
 		log.Printf("enqueue reply: %v", err)
-		go criticalNotifyUser(chatID, bot, "outbox", err)
+		go hub.criticalNotifyAddress(address, "outbox", err)
 	}
 }
 
@@ -591,6 +892,107 @@ func cmdHelp(_ cmdCtx, _ []string) (cmdReply, error) {
 
 func cmdStatus(c cmdCtx, _ []string) (cmdReply, error) {
 	return cmdReply{text: infoText(statusText(c.st))}, nil
+}
+
+func cmdTransports(c cmdCtx, fields []string) (cmdReply, error) {
+	if c.mgr == nil {
+		return cmdReply{}, errors.New("transport manager unavailable")
+	}
+	if len(fields) == 1 {
+		return cmdReply{text: transportsText(c.cfg, c.hub.clients, c.mgr)}, nil
+	}
+	if len(fields) != 3 {
+		return cmdReply{}, errors.New("usage: transports [on|off <tg|max>]")
+	}
+	action, name := strings.ToLower(fields[1]), strings.ToLower(fields[2])
+	if name == "max" || name == "telegram" {
+		if name == "max" {
+			name = "mx"
+		} else {
+			name = "tg"
+		}
+	}
+	if c.hub.clients[name] == nil {
+		return cmdReply{}, fmt.Errorf("transport %q is not configured", name)
+	}
+	c.mgr.toggleMu.Lock()
+	defer c.mgr.toggleMu.Unlock()
+	disabled := c.cfg.DisabledTransportNames()
+	switch action {
+	case "on":
+		disabled = withoutString(disabled, name)
+		if err := c.cfg.SetDisabledTransports(disabled); err != nil {
+			return cmdReply{}, err
+		}
+		c.mgr.start(name)
+	case "off":
+		if c.origin != nil && c.origin.Address.Transport == name {
+			return cmdReply{}, errors.New("cannot disable the transport carrying this command")
+		}
+		if !c.cfg.TransportDisabled(name) && enabledTransportCount(c.cfg, c.hub.clients) <= 1 {
+			return cmdReply{}, errors.New("cannot disable the last enabled transport")
+		}
+		if !containsString(disabled, name) {
+			disabled = append(disabled, name)
+		}
+		if err := c.cfg.SetDisabledTransports(disabled); err != nil {
+			return cmdReply{}, err
+		}
+		c.mgr.stop(name)
+	default:
+		return cmdReply{}, errors.New("usage: transports [on|off <tg|max>]")
+	}
+	return cmdReply{text: transportsText(c.cfg, c.hub.clients, c.mgr)}, nil
+}
+
+func transportsText(cfg *config.Config, clients map[string]transport.Client, mgr *transportManager) string {
+	lines := []string{"Transports:"}
+	for _, name := range []string{"tg", "mx"} {
+		if clients[name] == nil {
+			continue
+		}
+		state := "on"
+		if cfg.TransportDisabled(name) {
+			state = "off"
+		} else if mgr != nil {
+			if mgr.failure(name) != "" {
+				state = "unavailable"
+			} else if !mgr.isReady(name) {
+				state = "connecting"
+			}
+		}
+		lines = append(lines, "  "+name+" — "+state)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func enabledTransportCount(cfg *config.Config, clients map[string]transport.Client) int {
+	n := 0
+	for name := range clients {
+		if !cfg.TransportDisabled(name) {
+			n++
+		}
+	}
+	return n
+}
+
+func containsString(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutString(values []string, value string) []string {
+	result := values[:0]
+	for _, item := range values {
+		if item != value {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func cmdHostList(c cmdCtx, _ []string) (cmdReply, error) {
@@ -749,10 +1151,17 @@ var menuCommands = []tg.BotCommand{
 	{Command: "status", Description: "\u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435"},
 	{Command: "unlock", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (5m)"},
 	{Command: "unlock_max", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (max)"},
+	{Command: "transports", Description: "\u0442\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442\u044b"},
 	{Command: "lock", Description: "\u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c"},
 }
 
 func cmdMenu(c cmdCtx, _ []string) (cmdReply, error) {
+	if c.origin != nil && c.origin.Address.Transport != "tg" {
+		return cmdReply{}, errors.New("menu is available only in Telegram")
+	}
+	if c.bot == nil {
+		return cmdReply{}, errors.New("Telegram transport is not configured")
+	}
 	if err := c.bot.SetMyCommands(c.ctx, menuCommands); err != nil {
 		return cmdReply{}, err
 	}
@@ -761,6 +1170,10 @@ func cmdMenu(c cmdCtx, _ []string) (cmdReply, error) {
 
 func cmdUnlock(c cmdCtx, fields []string) (cmdReply, error) {
 	text, err := handleUnlock(fields, c.st, config.MaxTTL(c.cfg))
+	if err == nil && c.hub != nil {
+		c.hub.notify(false, text, c.origin)
+		return cmdReply{}, nil
+	}
 	return cmdReply{text: text}, err
 }
 
@@ -777,16 +1190,29 @@ func cmdUnseal(c cmdCtx, _ []string) (cmdReply, error) {
 	if err := c.st.Unseal(passphrase); err != nil {
 		return cmdReply{}, err
 	}
-	return cmdReply{text: unsealText()}, nil
+	text := unsealText()
+	if c.hub != nil {
+		c.hub.notify(false, text, c.origin)
+		return cmdReply{}, nil
+	}
+	return cmdReply{text: text}, nil
 }
 
 func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
 	c.st.Seal()
+	if c.hub != nil {
+		c.hub.notify(false, "⚪ sealed", c.origin)
+		return cmdReply{}, nil
+	}
 	return cmdReply{text: "⚪ sealed"}, nil
 }
 
 func cmdLock(c cmdCtx, _ []string) (cmdReply, error) {
 	c.st.Lock()
+	if c.hub != nil {
+		c.hub.notify(false, "🔒 locked", c.origin)
+		return cmdReply{}, nil
+	}
 	return cmdReply{text: "🔒 locked"}, nil
 }
 
@@ -871,7 +1297,8 @@ func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
 	if err := setLogLevel(c.cfg, c.audit, level); err != nil {
 		return cmdReply{}, err
 	}
-	return cmdReply{text: "⚙️ loglevel " + level}, nil
+	c.hub.notify(false, "⚙️ loglevel "+level, c.origin)
+	return cmdReply{}, nil
 }
 
 func setLogLevel(cfg *config.Config, audit *auditState, level string) error {
@@ -939,6 +1366,8 @@ commands:
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
 /loglevel <chat|all>
+/transports
+/transports on|off <tg|max>
 /menu
 `)
 }

@@ -19,8 +19,7 @@ import (
 	"time"
 
 	"picoman/internal/config"
-	"picoman/internal/outbox"
-	"picoman/internal/tg"
+	"picoman/internal/transport"
 )
 
 const repo = "PiDmitrius/picoman"
@@ -406,16 +405,16 @@ func updateText() (string, error) {
 	return strings.TrimSpace(sb.String()), nil
 }
 
-func handleInstallVersionMessage(out *outbox.Store, bot *tg.Client, msg tg.Message, tag string) {
-	if err := out.EnqueueReply(msg.Chat.ID, msg.MessageID, "⏳ installing "+tag+"..."); err != nil {
-		logEnqueueError(bot, msg.Chat.ID, err)
+func handleInstallVersionMessage(hub *transportHub, msg transport.Message, tag string) {
+	if err := hub.out.EnqueueTo(msg.Address, msg.MessageID, "", "⏳ installing "+tag+"..."); err != nil {
+		logEnqueueError(hub, msg.Address, err)
 	}
-	flushOutbox(out)
+	flushOutbox(hub.out)
 	if err := installRelease(tag); err != nil {
-		if enqueueErr := out.EnqueueReply(msg.Chat.ID, msg.MessageID, errorText(err.Error())); enqueueErr != nil {
-			logEnqueueError(bot, msg.Chat.ID, enqueueErr)
+		if enqueueErr := hub.out.EnqueueTo(msg.Address, msg.MessageID, "", errorText(err.Error())); enqueueErr != nil {
+			logEnqueueError(hub, msg.Address, enqueueErr)
 		}
-		flushOutbox(out)
+		flushOutbox(hub.out)
 	}
 }
 
@@ -442,9 +441,9 @@ func tagFromVersionCommand(cmd string) string {
 	return "v" + strings.ReplaceAll(strings.TrimPrefix(cmd, "v"), "_", ".")
 }
 
-func logEnqueueError(bot *tg.Client, chatID int64, err error) {
+func logEnqueueError(hub *transportHub, address transport.Address, err error) {
 	fmt.Fprintf(os.Stderr, "enqueue reply: %v\n", err)
-	go criticalNotifyUser(chatID, bot, "outbox", err)
+	go hub.criticalNotifyAddress(address, "outbox", err)
 }
 
 func stripHTML(s string) string {

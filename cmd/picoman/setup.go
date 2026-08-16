@@ -29,6 +29,8 @@ func runSetup() {
 
 	cfg.TelegramToken = promptSecretKeep(reader, "Telegram bot token", cfg.TelegramToken)
 	cfg.AllowedUsers = promptInt64ListKeep(reader, "Telegram allowed users", cfg.AllowedUsers)
+	cfg.MaxToken = promptSecretKeep(reader, "MAX bot token", cfg.MaxToken)
+	cfg.MaxAllowedUsers = promptInt64ListKeep(reader, "MAX allowed users", cfg.MaxAllowedUsers)
 	cfg.KeyPath = expandPathValue(promptStringKeep(reader, "SSH key path", displayPathValue(cfg.KeyPath)), "")
 	cfg.KeyPassphrase = promptSecretKeep(reader, "SSH key passphrase", cfg.KeyPassphrase)
 	cfg.KeyPassphraseCommand = promptStringKeep(reader, "SSH key passphrase command (stdout = passphrase)", cfg.KeyPassphraseCommand)
