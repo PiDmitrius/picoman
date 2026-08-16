@@ -30,6 +30,9 @@ type HostDB struct {
 type Config struct {
 	TelegramToken        string            `json:"tg_token"`
 	AllowedUsers         []int64           `json:"tg_allowed_users"`
+	MaxToken             string            `json:"mx_token,omitempty"`
+	MaxAllowedUsers      []int64           `json:"mx_allowed_users,omitempty"`
+	DisabledTransports   []string          `json:"disabled_transports,omitempty"`
 	KeyPath              string            `json:"key_path"`
 	KeyPassphrase        string            `json:"key_passphrase"`
 	KeyPassphraseCommand string            `json:"key_passphrase_command,omitempty"`
@@ -290,6 +293,39 @@ func (c *Config) SetLogLevel(level string) error {
 	return nil
 }
 
+func (c *Config) SetDisabledTransports(names []string) error {
+	names = uniqueSorted(names)
+	for _, name := range names {
+		if name != "tg" && name != "mx" {
+			return fmt.Errorf("invalid transport %q", name)
+		}
+	}
+	if err := saveConfigField("disabled_transports", names); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.DisabledTransports = names
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Config) TransportDisabled(name string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, disabled := range c.DisabledTransports {
+		if disabled == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) DisabledTransportNames() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.DisabledTransports...)
+}
+
 func saveConfigField(name string, value any) error {
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
@@ -409,11 +445,25 @@ func AllowedSet(c *Config) map[int64]bool {
 	return out
 }
 
+func MaxAllowedSet(c *Config) map[int64]bool {
+	out := make(map[int64]bool, len(c.MaxAllowedUsers))
+	for _, id := range c.MaxAllowedUsers {
+		out[id] = true
+	}
+	return out
+}
+
 func normalize(c *Config) (*Config, error) {
 	if c == nil {
 		c = Default()
 	}
 	def := Default()
+	c.DisabledTransports = uniqueSorted(c.DisabledTransports)
+	for _, name := range c.DisabledTransports {
+		if name != "tg" && name != "mx" {
+			return nil, fmt.Errorf("invalid disabled transport %q", name)
+		}
+	}
 	if c.ControlSocket == "" {
 		c.ControlSocket = def.ControlSocket
 	}

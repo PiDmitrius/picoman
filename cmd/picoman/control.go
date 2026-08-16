@@ -17,7 +17,6 @@ import (
 	"picoman/internal/agent"
 	"picoman/internal/config"
 	"picoman/internal/outbox"
-	"picoman/internal/tg"
 )
 
 // Control protocol (Unix socket, line-based):
@@ -32,7 +31,7 @@ type controlServer struct {
 	cfg   *config.Config
 	st    *agent.State
 	out   *outbox.Store
-	bot   *tg.Client
+	hub   *transportHub
 	audit *auditState
 }
 
@@ -59,7 +58,7 @@ func (s *controlServer) handlers() map[string]controlHandler {
 	}
 }
 
-func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *outbox.Store, bot *tg.Client, audit *auditState) {
+func runControl(ctx context.Context, cfg *config.Config, st *agent.State, hub *transportHub, audit *auditState) {
 	_ = os.Remove(cfg.ControlSocket)
 	ln, err := net.Listen("unix", cfg.ControlSocket)
 	if err != nil {
@@ -75,7 +74,7 @@ func runControl(ctx context.Context, cfg *config.Config, st *agent.State, out *o
 		_ = ln.Close()
 	}()
 
-	srv := &controlServer{cfg: cfg, st: st, out: out, bot: bot, audit: audit}
+	srv := &controlServer{cfg: cfg, st: st, out: hub.out, hub: hub, audit: audit}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -155,22 +154,22 @@ func (s *controlServer) unseal(args [][]byte) ([][]byte, error) {
 		return nil, errors.New("usage: UNSEAL <passphrase>")
 	}
 	if err := s.st.Unseal(string(args[0])); err != nil {
-		notify(s.out, s.cfg, s.bot, false, errorText("unseal failed: "+err.Error()))
+		s.hub.notify(false, errorText("unseal failed: "+err.Error()), nil)
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, false, unsealText())
+	s.hub.notify(false, unsealText(), nil)
 	return nil, nil
 }
 
 func (s *controlServer) seal(_ [][]byte) ([][]byte, error) {
 	s.st.Seal()
-	notify(s.out, s.cfg, s.bot, false, "⚪ sealed")
+	s.hub.notify(false, "⚪ sealed", nil)
 	return nil, nil
 }
 
 func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
 	s.st.Lock()
-	notify(s.out, s.cfg, s.bot, false, "🔒 locked")
+	s.hub.notify(false, "🔒 locked", nil)
 	return nil, nil
 }
 
@@ -182,7 +181,7 @@ func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 	if err := setLogLevel(s.cfg, s.audit, level); err != nil {
 		return nil, err
 	}
-	notify(s.out, s.cfg, s.bot, false, "⚙️ loglevel "+level)
+	s.hub.notify(false, "⚙️ loglevel "+level, nil)
 	return nil, nil
 }
 
@@ -315,7 +314,7 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 func (s *controlServer) startAction(text string) <-chan []actionMessage {
 	ch := make(chan []actionMessage, 1)
 	go func() {
-		ch <- sendActionStart(s.cfg, s.bot, true, text)
+		ch <- sendActionStart(s.hub, true, text)
 	}()
 	return ch
 }
@@ -324,10 +323,10 @@ func (s *controlServer) finishAction(startedCh <-chan []actionMessage, html bool
 	go func() {
 		started := <-startedCh
 		if len(started) > 0 {
-			editActionMessages(s.out, s.bot, started, html, text)
+			editActionMessages(s.hub, started, html, text)
 			return
 		}
-		notify(s.out, s.cfg, s.bot, html, text)
+		s.hub.notify(html, text, nil)
 	}()
 }
 
