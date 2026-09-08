@@ -351,8 +351,8 @@ func saveConfigField(name string, value any) error {
 	return writeAtomic(path, data, 0o600)
 }
 
-// writeAtomic writes content via temp+rename so config and host DB files are
-// never observed half-written.
+// writeAtomic writes content via temp+rename and syncs both, so config and host
+// DB files are never observed half-written and survive a power loss.
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".write-*")
@@ -365,6 +365,11 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmpPath)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return err
@@ -373,7 +378,20 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+func fsyncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func LoadHostDB(c *Config) error {
