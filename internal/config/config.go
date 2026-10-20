@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -276,8 +277,16 @@ func Save(c *Config) error {
 	return writeAtomic(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
+var logLevels = []string{"digest", "chat", "all"}
+
+var LogLevels = strings.Join(logLevels, "|")
+
+func ValidLogLevel(level string) bool {
+	return slices.Contains(logLevels, level)
+}
+
 func (c *Config) SetLogLevel(level string) error {
-	if level != "chat" && level != "all" {
+	if !ValidLogLevel(level) {
 		return fmt.Errorf("invalid log level %q", level)
 	}
 	c.mu.Lock()
@@ -505,11 +514,10 @@ func normalize(c *Config) (*Config, error) {
 	if c.RemoteWorkDir == "" {
 		c.RemoteWorkDir = def.RemoteWorkDir
 	}
-	switch c.LogLevel {
-	case "":
+	if c.LogLevel == "" {
 		c.LogLevel = def.LogLevel
-	case "chat", "all":
-	default:
+	}
+	if !ValidLogLevel(c.LogLevel) {
 		return nil, fmt.Errorf("invalid log level %q", c.LogLevel)
 	}
 	if c.KeyPassphrase != "" && c.KeyPassphraseCommand != "" {
