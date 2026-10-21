@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,7 +91,10 @@ func (t *testTransport) Send(_ context.Context, chatID, replyTo, text, format st
 	defer t.mu.Unlock()
 	t.messages = append(t.messages, transport.Message{Address: transport.Address{ChatID: chatID}, MessageID: replyTo, Text: text})
 	if t.sent != nil {
-		t.sent <- struct{}{}
+		select {
+		case t.sent <- struct{}{}:
+		default:
+		}
 	}
 	return "sent", t.err
 }
@@ -698,7 +702,7 @@ func TestRunGroupStartsHostsInParallelAndReportsInOrder(t *testing.T) {
 	}, 1)
 
 	go func() {
-		output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+		output, code, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
 			started <- host
 			<-release
 			return host + " output", 0, nil
@@ -746,7 +750,7 @@ func TestRunTargetExpressionCanStartWithHost(t *testing.T) {
 	}
 	var ran []string
 	var ranMu sync.Mutex
-	output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "one,@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+	output, code, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "one,@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
 		ranMu.Lock()
 		ran = append(ran, host)
 		ranMu.Unlock()
@@ -779,7 +783,7 @@ func TestRunGroupLimitsParallelHosts(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(context.Context, string, string) (string, int, error) {
+		_, _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(context.Context, string, string) (string, int, error) {
 			started <- struct{}{}
 			<-release
 			return "", 0, nil
@@ -819,7 +823,7 @@ func TestRunGroupPreservesExitCodePrecedence(t *testing.T) {
 			"two": {User: "user", Host: "two.example", Groups: []string{"web"}},
 		},
 	}
-	output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+	output, code, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
 		if host == "one" {
 			return "one failed", 3, nil
 		}
@@ -855,7 +859,7 @@ func TestRunGroupPreservesMixedErrorAndExitPrecedence(t *testing.T) {
 		{name: "error first", oneErr: errors.New("transport failed"), twoCode: 2, wantCode: 255},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			output, code, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+			output, code, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
 				if host == "one" {
 					return "", tt.oneCode, tt.oneErr
 				}
@@ -880,12 +884,12 @@ func TestRunGroupRejectsEmptyGroupAndLockedKey(t *testing.T) {
 			"one": {User: "user", Host: "one.example", Groups: []string{"web"}},
 		},
 	}
-	if _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@empty", "uptime", func() bool { return true }, nil); err == nil {
+	if _, _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@empty", "uptime", func() bool { return true }, nil); err == nil {
 		t.Fatal("empty group succeeded")
 	} else if !strings.Contains(err.Error(), `group "@empty" is empty`) {
 		t.Fatalf("empty group error = %v", err)
 	}
-	if _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return false }, nil); err == nil {
+	if _, _, _, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "uptime", func() bool { return false }, nil); err == nil {
 		t.Fatal("locked group run succeeded")
 	} else if err.Error() != "key is locked" {
 		t.Fatalf("locked group error = %v", err)
@@ -934,7 +938,7 @@ func TestChatLogLevelKeepsRunErrorMinimal(t *testing.T) {
 	if err == nil {
 		t.Fatal("cmdRun succeeded with locked key")
 	}
-	if got, want := reply.text, actionText("▶️ run", "host"); got != want {
+	if got, want := reply.text, "❌ "+actionText("▶️ run", "host"); got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
 	if containsAny(reply.text, "secret", "command", "key is locked") {
@@ -989,8 +993,8 @@ func TestChatLogLevelKeepsTransferErrorsMinimal(t *testing.T) {
 		fields []string
 		want   string
 	}{
-		{name: "get", fn: cmdGet, fields: []string{"get", "host", "secret-remote", "secret-local"}, want: actionText("⬅️ get", "host")},
-		{name: "put", fn: cmdPut, fields: []string{"put", "host", "secret-local", "secret-remote"}, want: actionText("➡️ put", "host")},
+		{name: "get", fn: cmdGet, fields: []string{"get", "host", "secret-remote", "secret-local"}, want: "❌ " + actionText("⬅️ get", "host")},
+		{name: "put", fn: cmdPut, fields: []string{"put", "host", "secret-local", "secret-remote"}, want: "❌ " + actionText("➡️ put", "host")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reply, err := tt.fn(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, tt.fields)
@@ -1021,7 +1025,7 @@ func TestPutCommandAcceptsGroupSelector(t *testing.T) {
 	if strings.Contains(err.Error(), "unknown target") {
 		t.Fatalf("group selector was treated as host: %v", err)
 	}
-	if got, want := reply.text, actionText("➡️ put", "@web"); got != want {
+	if got, want := reply.text, "❌ "+actionText("➡️ put", "@web"); got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
 }
@@ -1041,7 +1045,7 @@ func TestPutCommandAcceptsTargetExpression(t *testing.T) {
 	if strings.Contains(err.Error(), "unknown target") {
 		t.Fatalf("target expression was treated as host: %v", err)
 	}
-	if got, want := reply.text, actionText("➡️ put", "one,@web"); got != want {
+	if got, want := reply.text, "❌ "+actionText("➡️ put", "one,@web"); got != want {
 		t.Fatalf("reply = %q, want %q", got, want)
 	}
 }
@@ -1353,4 +1357,86 @@ func containsAny(s string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func TestDigestCountsSuccessfulActions(t *testing.T) {
+	s := &controlServer{audit: newAuditState("digest")}
+	for i := 0; i < 15; i++ {
+		s.succeedAction(s.startAction("start"), "▶️ run", "web", "done")
+	}
+	s.succeedAction(s.startAction("start"), "➡️ put", "web", "done")
+	start := time.Date(2026, 1, 1, 15, 0, 0, 0, time.UTC)
+	s.audit.since = start
+	got := s.audit.digestTextLocked(start.Add(time.Hour))
+	if want := "📊 15:00–16:00\n▶️ run <b>web</b> ×15\n➡️ put <b>web</b> ×1"; len(got) != 1 || got[0] != want {
+		t.Fatalf("digest = %q, want %q", got, want)
+	}
+}
+
+func TestDigestSplitsAtMessageLimit(t *testing.T) {
+	a := newAuditState("digest")
+	for i := 0; i < 300; i++ {
+		a.count("▶️ run", "host-"+strconv.Itoa(i))
+	}
+	texts := a.digestTextLocked(time.Now())
+	lines := 0
+	for _, text := range texts {
+		if len(text) > outbox.MaxMessageBytes || !strings.HasPrefix(text, "📊 ") {
+			t.Fatalf("part of %d bytes: %q", len(text), text[:40])
+		}
+		lines += strings.Count(text, "\n")
+	}
+	if len(texts) < 2 || lines != 300 {
+		t.Fatalf("parts = %d, lines = %d, want several parts with 300 lines", len(texts), lines)
+	}
+}
+
+func TestDigestBoundsLongTarget(t *testing.T) {
+	a := newAuditState("digest")
+	a.count("▶️ run", strings.Repeat("production-application-server,", 200))
+	texts := a.digestTextLocked(time.Now())
+	if len(texts) != 1 || len(texts[0]) > outbox.MaxMessageBytes || !strings.HasSuffix(texts[0], "</b> ×1") {
+		t.Fatalf("digest = %d parts, first %d bytes", len(texts), len(texts[0]))
+	}
+}
+
+func TestDigestSurvivesRestart(t *testing.T) {
+	var saved string
+	save := func(v string) error { saved = v; return nil }
+	first := newAuditState("digest")
+	first.attachStore("", save)
+	first.count("▶️ run", "web")
+	first.count("▶️ run", "web")
+	second := newAuditState("digest")
+	second.attachStore(saved, save)
+	if got := second.digestTextLocked(time.Now()); !strings.Contains(got[0], "▶️ run <b>web</b> ×2") {
+		t.Fatalf("restored digest = %q", got)
+	}
+}
+
+func TestGroupRunFlagsSSHFailureBehindRemoteExit(t *testing.T) {
+	cfg := &config.Config{Targets: map[string]config.Target{
+		"a": {User: "user", Host: "a.example", Groups: []string{"web"}},
+		"b": {User: "user", Host: "b.example", Groups: []string{"web"}},
+	}}
+	_, code, sshFailed, err := runTargetSelectorWithRunner(context.Background(), cfg, "@web", "true", func() bool { return true }, func(_ context.Context, host, _ string) (string, int, error) {
+		if host == "a" {
+			return "", 2, nil
+		}
+		return "", 255, nil
+	})
+	if err != nil || code != 2 || !sshFailed {
+		t.Fatalf("code = %d, sshFailed = %v, err = %v, want 2, true", code, sshFailed, err)
+	}
+}
+
+func TestDigestDoesNotCountUnsavedCall(t *testing.T) {
+	a := newAuditState("digest")
+	a.attachStore("", func(string) error { return errors.New("database is locked") })
+	if a.count("▶️ run", "web") {
+		t.Fatal("count reported success without saving")
+	}
+	if len(a.counts) != 0 {
+		t.Fatalf("counts = %v, want empty", a.counts)
+	}
 }

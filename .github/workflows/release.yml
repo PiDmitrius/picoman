@@ -26,8 +26,9 @@ jobs:
         run: |
           mkdir -p release
 
-          go build -trimpath -ldflags="-s -w" -o release/picoman-${{ github.ref_name }}-linux-amd64 ./cmd/picoman
-          sha256sum release/picoman-${{ github.ref_name }}-linux-amd64 > release/picoman-${{ github.ref_name }}-linux-amd64.sha256
+          name=picoman-${{ github.ref_name }}-linux-amd64
+          go build -trimpath -ldflags="-s -w" -o release/$name ./cmd/picoman
+          (cd release && sha256sum $name > $name.sha256)
 
       - name: Publish
         uses: softprops/action-gh-release@v2

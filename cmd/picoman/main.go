@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"picoman/internal/config"
 )
 
-const version = "v0.1.138"
+const version = "v0.1.144"
 
 func main() {
 	log.SetPrefix("picoman: ")
@@ -45,6 +47,8 @@ func main() {
 		runLocalPut(os.Args[2:])
 	case "loglevel":
 		runLogLevel(os.Args[2:])
+	case "digest":
+		runDigestCLI(os.Args[2:])
 	case "host":
 		runHost(os.Args[2:])
 	case "hosts":
@@ -106,7 +110,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  group remove @<group> <host>       Remove host from group")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Maintenance:")
-	fmt.Fprintln(os.Stderr, "  loglevel <chat|all>                Set audit verbosity")
+	fmt.Fprintf(os.Stderr, "  %-35sSet audit verbosity\n", "loglevel <"+config.LogLevels+">")
+	fmt.Fprintln(os.Stderr, "  digest                             Send accumulated digest now")
 	fmt.Fprintln(os.Stderr, "  update [--help]                    Update from developer_dir or latest GitHub release")
 	fmt.Fprintln(os.Stderr, "  fallback [<tag>]                   Install a specific GitHub release (no tag = list recent)")
 }

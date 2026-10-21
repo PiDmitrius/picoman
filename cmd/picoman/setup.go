@@ -52,10 +52,10 @@ func runSetup() {
 func promptLogLevelKeep(reader *bufio.Reader, label, current string) string {
 	for {
 		line := promptStringKeep(reader, label, current)
-		if line == "" || line == "chat" || line == "all" {
+		if line == "" || config.ValidLogLevel(line) {
 			return line
 		}
-		fmt.Println("Invalid log level, use chat or all")
+		fmt.Println("Invalid log level, use " + config.LogLevels)
 	}
 }
 

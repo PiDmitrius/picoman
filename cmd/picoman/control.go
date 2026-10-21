@@ -46,6 +46,7 @@ func (s *controlServer) handlers() map[string]controlHandler {
 		"SEAL":      bind(s.seal),
 		"LOCK":      bind(s.lock),
 		"LOGLEVEL":  bind(s.loglevel),
+		"DIGEST":    bind(s.digest),
 		"RUN":       s.run,
 		"GET":       s.get,
 		"PUT":       s.put,
@@ -175,13 +176,19 @@ func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
 
 func (s *controlServer) loglevel(args [][]byte) ([][]byte, error) {
 	if len(args) != 1 {
-		return nil, errors.New("usage: LOGLEVEL <chat|all>")
+		return nil, errors.New("usage: LOGLEVEL <" + config.LogLevels + ">")
 	}
 	level := string(args[0])
 	if err := setLogLevel(s.cfg, s.audit, level); err != nil {
 		return nil, err
 	}
+	s.audit.sendDigest(s.hub, nil, time.Now(), false)
 	s.hub.notify(false, "⚙️ loglevel "+level, nil)
+	return nil, nil
+}
+
+func (s *controlServer) digest(_ [][]byte) ([][]byte, error) {
+	s.audit.sendDigest(s.hub, nil, time.Now(), true)
 	return nil, nil
 }
 
@@ -191,21 +198,19 @@ func (s *controlServer) run(ctx context.Context, args [][]byte) ([][]byte, error
 	}
 	host, command := string(args[0]), string(args[1])
 	startedCh := s.startAction(runStartAuditText(s.audit, host, command))
-	output, exitCode, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
+	output, exitCode, sshFailed, err := runTargetSelector(ctx, s.cfg, s.st, host, command)
 	log.Printf("control run host=%s exit=%d err=%v", host, exitCode, err)
 	if err != nil {
 		s.finishAction(startedCh, true, runAuditText(s.audit, host, command, output, err.Error()))
 		return nil, err
 	}
-	switch {
-	case exitCode == 255:
-		// ssh-level failure (connect/auth/protocol). Distinct from any
-		// remote exit 1..254 which we propagate transparently.
+	if sshFailed {
+		// ssh-level failure (connect/auth/protocol) on the target or any group
+		// host. Distinct from any remote exit 1..254 which we propagate
+		// transparently.
 		s.finishAction(startedCh, true, runAuditText(s.audit, host, command, output, "ssh: exit status 255 (connect/auth/protocol)"))
-	case s.audit.LogLevel() == "all":
-		s.finishAction(startedCh, true, runText(host, command, output))
-	default:
-		s.finishAction(startedCh, true, actionText("▶️ run", host))
+	} else {
+		s.succeedAction(startedCh, "▶️ run", host, runAuditText(s.audit, host, command, output, ""))
 	}
 	return [][]byte{
 		[]byte(output),
@@ -223,7 +228,7 @@ func (s *controlServer) get(ctx context.Context, args [][]byte) ([][]byte, error
 		s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, err.Error()))
 		return nil, err
 	}
-	s.finishAction(startedCh, true, transferAuditText(s.audit, "⬅️ get", host, remote, local, ""))
+	s.succeedAction(startedCh, "⬅️ get", host, transferAuditText(s.audit, "⬅️ get", host, remote, local, ""))
 	return nil, nil
 }
 
@@ -307,11 +312,14 @@ func (s *controlServer) put(ctx context.Context, args [][]byte) ([][]byte, error
 		s.finishAction(startedCh, true, transferAuditText(s.audit, "➡️ put", host, local, remote, err.Error()))
 		return nil, err
 	}
-	s.finishAction(startedCh, true, transferAuditText(s.audit, "➡️ put", host, local, remote, ""))
+	s.succeedAction(startedCh, "➡️ put", host, transferAuditText(s.audit, "➡️ put", host, local, remote, ""))
 	return nil, nil
 }
 
 func (s *controlServer) startAction(text string) <-chan []actionMessage {
+	if s.audit.digest() {
+		return nil
+	}
 	ch := make(chan []actionMessage, 1)
 	go func() {
 		ch <- sendActionStart(s.hub, true, text)
@@ -319,7 +327,18 @@ func (s *controlServer) startAction(text string) <-chan []actionMessage {
 	return ch
 }
 
+func (s *controlServer) succeedAction(startedCh <-chan []actionMessage, action, target, text string) {
+	if startedCh == nil && s.audit.count(action, target) {
+		return
+	}
+	s.finishAction(startedCh, true, text)
+}
+
 func (s *controlServer) finishAction(startedCh <-chan []actionMessage, html bool, text string) {
+	if startedCh == nil {
+		s.hub.notify(html, text, nil)
+		return
+	}
 	go func() {
 		started := <-startedCh
 		if len(started) > 0 {
@@ -443,9 +462,17 @@ func runLocalPut(args []string) {
 	opControl("PUT", args[0], args[1], remoteName)
 }
 
+func runDigestCLI(args []string) {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: picoman digest")
+		os.Exit(1)
+	}
+	simpleControl("DIGEST")
+}
+
 func runLogLevel(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: picoman loglevel <chat|all>")
+		fmt.Fprintln(os.Stderr, "usage: picoman loglevel <"+config.LogLevels+">")
 		os.Exit(1)
 	}
 	simpleControl("LOGLEVEL", args[0])

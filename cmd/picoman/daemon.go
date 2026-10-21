@@ -98,6 +98,7 @@ func runDaemon() {
 	hub := &transportHub{cfg: cfg, clients: clients, out: out}
 	out.SetAlertSink(func(text string) { go hub.criticalNotify("outbox", errors.New(text)) })
 	audit := newAuditState(cfg.LogLevel)
+	audit.attachStore(out.Digest(), out.SetDigest)
 	manager := newTransportManager(ctx, hub, st, audit)
 	hub.available = manager.isRoutable
 	out.SetTransportEnabled(func(name string) bool { return !cfg.TransportDisabled(name) && manager.isReady(name) })
@@ -106,6 +107,8 @@ func runDaemon() {
 	defer stopOutbox()
 	go out.Run(outboxCtx)
 	go runControl(ctx, cfg, st, hub, audit)
+	audit.sendDigest(hub, nil, time.Now(), false)
+	go runDigest(ctx, hub, audit)
 	go watchUnlockExpiry(ctx, st, hub)
 
 	marker := readRestartMarker()
@@ -132,6 +135,7 @@ func runDaemon() {
 	<-ctx.Done()
 
 	st.Seal()
+	audit.sendDigest(hub, nil, time.Now(), false)
 	hub.notify(false, infoText(lifecycleText("stopped")), nil)
 	// Stop the Run goroutine first so it doesn't race Flush on next().
 	stopOutbox()
@@ -419,17 +423,20 @@ func updateLifecycleText(marker restartMarker) string {
 	return "picoman " + version + " updated"
 }
 
-func (h *transportHub) notify(html bool, text string, origin *transport.Message) {
+// notify reports whether the message was queued for at least one recipient.
+func (h *transportHub) notify(html bool, text string, origin *transport.Message) bool {
 	format := ""
 	if html {
 		format = "html"
 	}
-	originSent := false
+	originSent, queued := false, false
 	enqueue := func(address transport.Address, replyTo string) {
 		if err := h.out.EnqueueTo(address, replyTo, format, text); err != nil {
 			log.Printf("enqueue notify transport=%s chat=%s: %v", address.Transport, address.ChatID, err)
 			go h.criticalNotifyAddress(address, "outbox", err)
+			return
 		}
+		queued = true
 	}
 	for _, address := range h.destinations() {
 		replyTo := ""
@@ -442,6 +449,7 @@ func (h *transportHub) notify(html bool, text string, origin *transport.Message)
 	if origin != nil && !originSent {
 		enqueue(origin.Address, origin.MessageID)
 	}
+	return queued
 }
 
 type actionMessage struct {
@@ -741,6 +749,7 @@ func init() {
 		"get":        {fn: cmdGet, async: true},
 		"put":        {fn: cmdPut, async: true},
 		"loglevel":   {fn: cmdLogLevel},
+		"digest":     {fn: cmdDigest},
 		"menu":       {fn: cmdMenu, async: true},
 		"transports": {fn: cmdTransports},
 	}
@@ -1151,6 +1160,7 @@ var menuCommands = []tg.BotCommand{
 	{Command: "status", Description: "\u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435"},
 	{Command: "unlock", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (5m)"},
 	{Command: "unlock_max", Description: "\u0440\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c (max)"},
+	{Command: "digest", Description: "\u0441\u0432\u043e\u0434\u043a\u0430"},
 	{Command: "transports", Description: "\u0442\u0440\u0430\u043d\u0441\u043f\u043e\u0440\u0442\u044b"},
 	{Command: "lock", Description: "\u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c"},
 }
@@ -1225,20 +1235,21 @@ func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
-	output, command, target, exitCode, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	output, command, target, _, sshFailed, err := handleRun(c.ctx, c.cfg, c.st, fields)
 	if command == "" {
 		return cmdReply{html: true}, err
 	}
 	// Transport-level failures: ssh couldn't run at all, or returned 255
-	// (its own signal for connect/auth/protocol error). Everything else is
-	// the remote command's own exit code — propagate transparently.
+	// (its own signal for connect/auth/protocol error) on the target or any
+	// group host. Everything else is the remote command's own exit code —
+	// propagate transparently.
 	if err != nil {
 		return cmdReply{
 			text: runAuditText(c.audit, target, command, output, err.Error()),
 			html: true,
 		}, err
 	}
-	if exitCode == 255 {
+	if sshFailed {
 		return cmdReply{
 			text: runAuditText(c.audit, target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
 			html: true,
@@ -1291,18 +1302,24 @@ func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
 
 func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
 	if len(fields) != 2 {
-		return cmdReply{}, errors.New("usage: loglevel <chat|all>")
+		return cmdReply{}, errors.New("usage: loglevel <" + config.LogLevels + ">")
 	}
 	level := fields[1]
 	if err := setLogLevel(c.cfg, c.audit, level); err != nil {
 		return cmdReply{}, err
 	}
+	c.audit.sendDigest(c.hub, c.origin, time.Now(), false)
 	c.hub.notify(false, "⚙️ loglevel "+level, c.origin)
 	return cmdReply{}, nil
 }
 
+func cmdDigest(c cmdCtx, _ []string) (cmdReply, error) {
+	c.audit.sendDigest(c.hub, c.origin, time.Now(), true)
+	return cmdReply{}, nil
+}
+
 func setLogLevel(cfg *config.Config, audit *auditState, level string) error {
-	if level != "chat" && level != "all" {
+	if !config.ValidLogLevel(level) {
 		return errors.New("bad loglevel")
 	}
 	if cfg != nil {
@@ -1365,7 +1382,8 @@ commands:
 /run <target> <command>
 /get <target> <remote-file> [local-file]
 /put <target> <local-file> [remote-file]
-/loglevel <chat|all>
+/loglevel <` + config.LogLevels + `>
+/digest
 /transports
 /transports on|off <tg|max>
 /menu
@@ -1763,14 +1781,14 @@ func shellQuote(s string) string {
 // err is non-nil only for transport-level failures (target unknown, key
 // locked, ssh couldn't run). A remote non-zero exit is not an error — it's
 // just the remote command's own signal, surfaced via exitCode.
-func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (output, command, target string, exitCode int, err error) {
+func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (output, command, target string, exitCode int, sshFailed bool, err error) {
 	if len(fields) < 3 {
-		return "", "", "", 0, errors.New("usage: /run <target> <command>")
+		return "", "", "", 0, false, errors.New("usage: /run <target> <command>")
 	}
 	target = fields[1]
 	command = strings.Join(fields[2:], " ")
-	output, exitCode, err = runTargetSelector(ctx, cfg, st, target, command)
-	return output, command, target, exitCode, err
+	output, exitCode, sshFailed, err = runTargetSelector(ctx, cfg, st, target, command)
+	return output, command, target, exitCode, sshFailed, err
 }
 
 func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
@@ -1814,7 +1832,7 @@ func runTarget(ctx context.Context, cfg *config.Config, st *agent.State, name, c
 	return runSSH(ctx, cfg, st, t, command)
 }
 
-func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, err error) {
+func runTargetSelector(ctx context.Context, cfg *config.Config, st *agent.State, selector, command string) (output string, exitCode int, sshFailed bool, err error) {
 	return runTargetSelectorWithRunner(ctx, cfg, selector, command, st.IsUnlocked, func(ctx context.Context, host, command string) (string, int, error) {
 		return runTarget(ctx, cfg, st, host, command)
 	})
@@ -1826,19 +1844,20 @@ type runTargetResult struct {
 	err      error
 }
 
-func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, selector, command string, isUnlocked func() bool, runner func(context.Context, string, string) (string, int, error)) (output string, exitCode int, err error) {
+func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, selector, command string, isUnlocked func() bool, runner func(context.Context, string, string) (string, int, error)) (output string, exitCode int, sshFailed bool, err error) {
 	if !isTargetExpr(selector) {
-		return runner(ctx, selector, command)
+		output, exitCode, err = runner(ctx, selector, command)
+		return output, exitCode, exitCode == 255, err
 	}
 	hosts, err := hostsForTargetExpr(cfg, selector)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if len(hosts) == 0 {
-		return "", 0, fmt.Errorf("target expression %q is empty", selector)
+		return "", 0, false, fmt.Errorf("target expression %q is empty", selector)
 	}
 	if !isUnlocked() {
-		return "", 0, errors.New("key is locked")
+		return "", 0, false, errors.New("key is locked")
 	}
 	results := make([]runTargetResult, len(hosts))
 	sem := make(chan struct{}, maxParallelGroupRuns)
@@ -1871,10 +1890,14 @@ func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, select
 		}
 		if runErr != nil {
 			b.WriteString(runErr.Error())
+			sshFailed = true
 			if finalCode == 0 {
 				finalCode = 255
 			}
 			continue
+		}
+		if code == 255 {
+			sshFailed = true
 		}
 		if code != 0 {
 			b.WriteString("exit status ")
@@ -1886,7 +1909,7 @@ func runTargetSelectorWithRunner(ctx context.Context, cfg *config.Config, select
 			b.WriteString("ok")
 		}
 	}
-	return strings.TrimRight(b.String(), "\n"), finalCode, nil
+	return strings.TrimRight(b.String(), "\n"), finalCode, sshFailed, nil
 }
 
 func targetForSSH(cfg *config.Config, st *agent.State, name string) (config.Target, error) {
@@ -2210,6 +2233,9 @@ func runStartAuditText(a *auditState, target, command string) string {
 
 func runAuditText(a *auditState, target, command, output, reason string) string {
 	if !auditFull(a) {
+		if reason != "" {
+			return "❌ " + actionText("▶️ run", target)
+		}
 		return actionText("▶️ run", target)
 	}
 	if reason != "" {
@@ -2277,6 +2303,9 @@ func transferStartAuditText(a *auditState, op, target, source, destination strin
 
 func transferAuditText(a *auditState, op, target, source, destination, reason string) string {
 	if !auditFull(a) {
+		if reason != "" {
+			return "❌ " + actionText(op, target)
+		}
 		return actionText(op, target)
 	}
 	if reason != "" {

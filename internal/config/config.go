@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -276,8 +277,16 @@ func Save(c *Config) error {
 	return writeAtomic(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
+var logLevels = []string{"digest", "chat", "all"}
+
+var LogLevels = strings.Join(logLevels, "|")
+
+func ValidLogLevel(level string) bool {
+	return slices.Contains(logLevels, level)
+}
+
 func (c *Config) SetLogLevel(level string) error {
-	if level != "chat" && level != "all" {
+	if !ValidLogLevel(level) {
 		return fmt.Errorf("invalid log level %q", level)
 	}
 	c.mu.Lock()
@@ -351,8 +360,8 @@ func saveConfigField(name string, value any) error {
 	return writeAtomic(path, data, 0o600)
 }
 
-// writeAtomic writes content via temp+rename so config and host DB files are
-// never observed half-written.
+// writeAtomic writes content via temp+rename and syncs both, so config and host
+// DB files are never observed half-written and survive a power loss.
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".write-*")
@@ -365,6 +374,11 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmpPath)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return err
@@ -373,7 +387,20 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+func fsyncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func LoadHostDB(c *Config) error {
@@ -487,11 +514,10 @@ func normalize(c *Config) (*Config, error) {
 	if c.RemoteWorkDir == "" {
 		c.RemoteWorkDir = def.RemoteWorkDir
 	}
-	switch c.LogLevel {
-	case "":
+	if c.LogLevel == "" {
 		c.LogLevel = def.LogLevel
-	case "chat", "all":
-	default:
+	}
+	if !ValidLogLevel(c.LogLevel) {
 		return nil, fmt.Errorf("invalid log level %q", c.LogLevel)
 	}
 	if c.KeyPassphrase != "" && c.KeyPassphraseCommand != "" {
