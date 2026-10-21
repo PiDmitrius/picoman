@@ -5,11 +5,8 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-latest
+    container: golang:1.26.5-trixie
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.5'
-
-      - run: go build ./cmd/picoman
+      - run: go build -buildvcs=false ./cmd/picoman

@@ -9,14 +9,11 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    container: golang:1.26.5-trixie
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.5'
 
       - name: Build
         env:
@@ -27,7 +24,11 @@ jobs:
           mkdir -p release
 
           name=picoman-${{ github.ref_name }}-linux-amd64
-          go build -trimpath -ldflags="-s -w" -o release/$name ./cmd/picoman
+          go build -buildvcs=false -trimpath -ldflags="-s -w" -o release/$name ./cmd/picoman
+          if readelf -n release/$name | grep 'ISA needed' | grep -q 'x86-64-v'; then
+            readelf -n release/$name | grep 'ISA needed'
+            exit 1
+          fi
           (cd release && sha256sum $name > $name.sha256)
 
       - name: Publish
