@@ -91,7 +91,10 @@ func (t *testTransport) Send(_ context.Context, chatID, replyTo, text, format st
 	defer t.mu.Unlock()
 	t.messages = append(t.messages, transport.Message{Address: transport.Address{ChatID: chatID}, MessageID: replyTo, Text: text})
 	if t.sent != nil {
-		t.sent <- struct{}{}
+		select {
+		case t.sent <- struct{}{}:
+		default:
+		}
 	}
 	return "sent", t.err
 }
