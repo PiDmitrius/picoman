@@ -8,7 +8,7 @@ import (
 	"picoman/internal/config"
 )
 
-const version = "v0.1.145"
+const version = "v0.1.151"
 
 func main() {
 	log.SetPrefix("picoman: ")

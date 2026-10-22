@@ -927,87 +927,24 @@ func TestCmdLogLevelUpdatesAuditState(t *testing.T) {
 	}
 }
 
-func TestChatLogLevelKeepsRunErrorMinimal(t *testing.T) {
-	cfg := &config.Config{
-		Targets: map[string]config.Target{
-			"host": {User: "user", Host: "host.example"},
-		},
+func TestChatReplyShowsOnlyResult(t *testing.T) {
+	if got := commandStartText("run", []string{"run", "host", "uptime"}); got != "..." {
+		t.Fatalf("start = %q", got)
 	}
+	if got, want := chatRunText("up", ""), "<blockquote><code>up</code></blockquote>"; got != want {
+		t.Fatalf("run = %q, want %q", got, want)
+	}
+	cfg := &config.Config{Targets: map[string]config.Target{"host": {User: "user", Host: "host.example"}}}
 	st := agent.New(t.TempDir()+"/key", time.Minute)
-	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, []string{"run", "host", "secret", "command"})
-	if err == nil {
-		t.Fatal("cmdRun succeeded with locked key")
-	}
-	if got, want := reply.text, "❌ "+actionText("▶️ run", "host"); got != want {
-		t.Fatalf("reply = %q, want %q", got, want)
-	}
-	if containsAny(reply.text, "secret", "command", "key is locked") {
-		t.Fatalf("chat reply leaked details: %q", reply.text)
-	}
-}
-
-func TestStartTextFollowsLogLevel(t *testing.T) {
-	chat := commandStartText(newAuditState("chat"), "run", []string{"run", "host", "secret", "command"})
-	if got, want := chat, actionStartText("▶️ run", "host"); got != want {
-		t.Fatalf("chat start = %q, want %q", got, want)
-	}
-	if containsAny(chat, "secret", "command") {
-		t.Fatalf("chat start leaked command: %q", chat)
-	}
-
-	all := commandStartText(newAuditState("all"), "run", []string{"run", "host", "secret", "command"})
-	if !strings.Contains(all, "secret command") {
-		t.Fatalf("all start did not include command: %q", all)
-	}
-	if strings.Contains(all, "(waiting...)") {
-		t.Fatalf("all start has redundant waiting marker: %q", all)
-	}
-}
-
-func TestAllLogLevelKeepsRunErrorDetails(t *testing.T) {
-	cfg := &config.Config{
-		Targets: map[string]config.Target{
-			"host": {User: "user", Host: "host.example"},
-		},
-	}
-	st := agent.New(t.TempDir()+"/key", time.Minute)
-	reply, err := cmdRun(cmdCtx{cfg: cfg, st: st, audit: newAuditState("all")}, []string{"run", "host", "secret", "command"})
-	if err == nil {
-		t.Fatal("cmdRun succeeded with locked key")
-	}
-	if !containsAny(reply.text, "secret command", "key is locked") {
-		t.Fatalf("all reply did not include details: %q", reply.text)
-	}
-}
-
-func TestChatLogLevelKeepsTransferErrorsMinimal(t *testing.T) {
-	cfg := &config.Config{
-		Targets: map[string]config.Target{
-			"host": {User: "user", Host: "host.example"},
-		},
-	}
-	st := agent.New(t.TempDir()+"/key", time.Minute)
-	for _, tt := range []struct {
-		name   string
-		fn     func(cmdCtx, []string) (cmdReply, error)
-		fields []string
-		want   string
-	}{
-		{name: "get", fn: cmdGet, fields: []string{"get", "host", "secret-remote", "secret-local"}, want: "❌ " + actionText("⬅️ get", "host")},
-		{name: "put", fn: cmdPut, fields: []string{"put", "host", "secret-local", "secret-remote"}, want: "❌ " + actionText("➡️ put", "host")},
+	for _, fields := range [][]string{
+		{"run", "host", "secret"},
+		{"get", "host", "secret-remote"},
+		{"put", "host", "secret-local"},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			reply, err := tt.fn(cmdCtx{cfg: cfg, st: st, audit: newAuditState("chat")}, tt.fields)
-			if err == nil {
-				t.Fatal("command succeeded with locked key")
-			}
-			if reply.text != tt.want {
-				t.Fatalf("reply = %q, want %q", reply.text, tt.want)
-			}
-			if containsAny(reply.text, "secret-local", "secret-remote", "key is locked") {
-				t.Fatalf("chat reply leaked details: %q", reply.text)
-			}
-		})
+		reply, err := commands[fields[0]].fn(cmdCtx{cfg: cfg, st: st, audit: newAuditState("digest")}, fields)
+		if err == nil || reply.text != "❌ key is locked" {
+			t.Fatalf("%s reply = %q, err = %v", fields[0], reply.text, err)
+		}
 	}
 }
 
@@ -1025,8 +962,8 @@ func TestPutCommandAcceptsGroupSelector(t *testing.T) {
 	if strings.Contains(err.Error(), "unknown target") {
 		t.Fatalf("group selector was treated as host: %v", err)
 	}
-	if got, want := reply.text, "❌ "+actionText("➡️ put", "@web"); got != want {
-		t.Fatalf("reply = %q, want %q", got, want)
+	if reply.text != "❌ key is locked" {
+		t.Fatalf("reply = %q", reply.text)
 	}
 }
 
@@ -1045,8 +982,8 @@ func TestPutCommandAcceptsTargetExpression(t *testing.T) {
 	if strings.Contains(err.Error(), "unknown target") {
 		t.Fatalf("target expression was treated as host: %v", err)
 	}
-	if got, want := reply.text, "❌ "+actionText("➡️ put", "one,@web"); got != want {
-		t.Fatalf("reply = %q, want %q", got, want)
+	if reply.text != "❌ key is locked" {
+		t.Fatalf("reply = %q", reply.text)
 	}
 }
 
@@ -1411,6 +1348,28 @@ func TestDigestSurvivesRestart(t *testing.T) {
 	second.attachStore(saved, save)
 	if got := second.digestTextLocked(time.Now()); !strings.Contains(got[0], "▶️ run <b>web</b> ×2") {
 		t.Fatalf("restored digest = %q", got)
+	}
+}
+
+func TestLockSendsDigestFirst(t *testing.T) {
+	tgClient := &testTransport{}
+	clients := map[string]transport.Client{"tg": tgClient}
+	store, err := outbox.Open(t.TempDir()+"/outbox.sqlite", clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hub := &transportHub{cfg: &config.Config{AllowedUsers: []int64{1}}, clients: clients, out: store}
+	audit := newAuditState("digest")
+	audit.count("▶️ run", "web")
+	notifyLockState(hub, audit, "🔒 locked", nil)
+	for i := 0; i < 2; i++ {
+		if err := store.SendOne(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := tgClient.messages; !strings.HasPrefix(got[0].Text, "📊 ") || got[1].Text != "🔒 locked" {
+		t.Fatalf("messages = %q, %q", got[0].Text, got[1].Text)
 	}
 }
 
