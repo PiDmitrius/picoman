@@ -109,7 +109,7 @@ func runDaemon() {
 	go runControl(ctx, cfg, st, hub, audit)
 	audit.sendDigest(hub, nil, time.Now(), false)
 	go runDigest(ctx, hub, audit)
-	go watchUnlockExpiry(ctx, st, hub)
+	go watchUnlockExpiry(ctx, st, hub, audit)
 
 	marker := readRestartMarker()
 	if marker.Reason == "update" {
@@ -685,7 +685,7 @@ func flushOutbox(out *outbox.Store) {
 	out.Flush(ctx)
 }
 
-func watchUnlockExpiry(ctx context.Context, st *agent.State, hub *transportHub) {
+func watchUnlockExpiry(ctx context.Context, st *agent.State, hub *transportHub, audit *auditState) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -699,7 +699,7 @@ func watchUnlockExpiry(ctx context.Context, st *agent.State, hub *transportHub) 
 		if !st.LockExpired(time.Now()) {
 			continue
 		}
-		hub.notify(false, "🔒 locked", nil)
+		notifyLockState(hub, audit, "🔒 locked", nil)
 	}
 }
 
@@ -795,7 +795,7 @@ func handleMessage(ctx context.Context, hub *transportHub, cfg *config.Config, s
 		enqueueReply(hub, msg, reply)
 	}
 	if entry.async {
-		if start := commandStartText(audit, name, fields); start != "" {
+		if start := commandStartText(name, fields); start != "" {
 			go func() {
 				startedCh := make(chan []actionMessage, 1)
 				go func() {
@@ -828,34 +828,11 @@ func inboundCommandContext(sourceCtx context.Context, mgr *transportManager) con
 	return sourceCtx
 }
 
-func commandStartText(audit *auditState, name string, fields []string) string {
-	switch name {
-	case "run":
-		if len(fields) < 3 {
-			return ""
-		}
-		return runStartAuditText(audit, fields[1], strings.Join(fields[2:], " "))
-	case "get":
-		if len(fields) < 3 {
-			return ""
-		}
-		localName := defaultTransferName(fields[2])
-		if len(fields) >= 4 {
-			localName = fields[3]
-		}
-		return transferStartAuditText(audit, "⬅️ get", fields[1], fields[2], localName)
-	case "put":
-		if len(fields) < 3 {
-			return ""
-		}
-		remoteName := defaultTransferName(fields[2])
-		if len(fields) >= 4 {
-			remoteName = fields[3]
-		}
-		return transferStartAuditText(audit, "➡️ put", fields[1], fields[2], remoteName)
-	default:
-		return ""
+func commandStartText(name string, fields []string) string {
+	if (name == "run" || name == "get" || name == "put") && len(fields) >= 3 {
+		return "..."
 	}
+	return ""
 }
 
 func logCommand(msg transport.Message, err error) {
@@ -1211,7 +1188,7 @@ func cmdUnseal(c cmdCtx, _ []string) (cmdReply, error) {
 func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
 	c.st.Seal()
 	if c.hub != nil {
-		c.hub.notify(false, "⚪ sealed", c.origin)
+		notifyLockState(c.hub, c.audit, "⚪ sealed", c.origin)
 		return cmdReply{}, nil
 	}
 	return cmdReply{text: "⚪ sealed"}, nil
@@ -1220,7 +1197,7 @@ func cmdSeal(c cmdCtx, _ []string) (cmdReply, error) {
 func cmdLock(c cmdCtx, _ []string) (cmdReply, error) {
 	c.st.Lock()
 	if c.hub != nil {
-		c.hub.notify(false, "🔒 locked", c.origin)
+		notifyLockState(c.hub, c.audit, "🔒 locked", c.origin)
 		return cmdReply{}, nil
 	}
 	return cmdReply{text: "🔒 locked"}, nil
@@ -1235,7 +1212,7 @@ func cmdUpdate(_ cmdCtx, _ []string) (cmdReply, error) {
 }
 
 func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
-	output, command, target, _, sshFailed, err := handleRun(c.ctx, c.cfg, c.st, fields)
+	output, command, _, _, sshFailed, err := handleRun(c.ctx, c.cfg, c.st, fields)
 	if command == "" {
 		return cmdReply{html: true}, err
 	}
@@ -1244,60 +1221,27 @@ func cmdRun(c cmdCtx, fields []string) (cmdReply, error) {
 	// group host. Everything else is the remote command's own exit code —
 	// propagate transparently.
 	if err != nil {
-		return cmdReply{
-			text: runAuditText(c.audit, target, command, output, err.Error()),
-			html: true,
-		}, err
+		return cmdReply{text: chatRunText(output, err.Error()), html: true}, err
 	}
 	if sshFailed {
-		return cmdReply{
-			text: runAuditText(c.audit, target, command, output, "ssh: exit status 255 (connect/auth/protocol)"),
-			html: true,
-		}, errors.New("ssh: exit status 255")
+		return cmdReply{text: chatRunText(output, "ssh: exit status 255 (connect/auth/protocol)"), html: true}, errors.New("ssh: exit status 255")
 	}
-	return cmdReply{text: runAuditText(c.audit, target, command, output, ""), html: true}, nil
+	return cmdReply{text: chatRunText(output, ""), html: true}, nil
 }
 
 func cmdGet(c cmdCtx, fields []string) (cmdReply, error) {
-	text, err := handleGet(c.ctx, c.cfg, c.st, fields)
-	if err == nil {
-		if len(fields) >= 2 && !auditFull(c.audit) {
-			return cmdReply{text: actionText("⬅️ get", fields[1]), html: true}, nil
-		}
-		return cmdReply{text: text, html: true}, nil
-	}
-	if len(fields) < 3 {
-		return cmdReply{html: true}, err
-	}
-	localName := defaultTransferName(fields[2])
-	if len(fields) >= 4 {
-		localName = fields[3]
-	}
-	return cmdReply{
-		text: transferAuditText(c.audit, "⬅️ get", fields[1], fields[2], localName, err.Error()),
-		html: true,
-	}, err
+	return chatTransferReply(handleGet(c.ctx, c.cfg, c.st, fields))
 }
 
 func cmdPut(c cmdCtx, fields []string) (cmdReply, error) {
-	text, err := handlePut(c.ctx, c.cfg, c.st, fields)
-	if err == nil {
-		if len(fields) >= 2 && !auditFull(c.audit) {
-			return cmdReply{text: actionText("➡️ put", fields[1]), html: true}, nil
-		}
-		return cmdReply{text: text, html: true}, nil
+	return chatTransferReply(handlePut(c.ctx, c.cfg, c.st, fields))
+}
+
+func chatTransferReply(err error) (cmdReply, error) {
+	if err != nil {
+		return cmdReply{text: errorText(err.Error())}, err
 	}
-	if len(fields) < 3 {
-		return cmdReply{html: true}, err
-	}
-	remoteName := defaultTransferName(fields[2])
-	if len(fields) >= 4 {
-		remoteName = fields[3]
-	}
-	return cmdReply{
-		text: transferAuditText(c.audit, "➡️ put", fields[1], fields[2], remoteName, err.Error()),
-		html: true,
-	}, err
+	return cmdReply{text: "✅"}, nil
 }
 
 func cmdLogLevel(c cmdCtx, fields []string) (cmdReply, error) {
@@ -1791,32 +1735,26 @@ func handleRun(ctx context.Context, cfg *config.Config, st *agent.State, fields 
 	return output, command, target, exitCode, sshFailed, err
 }
 
-func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+func handleGet(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) error {
 	if len(fields) < 3 || len(fields) > 4 {
-		return "", errors.New("usage: get <target> <remote-file> [local-file]")
+		return errors.New("usage: get <target> <remote-file> [local-file]")
 	}
 	localName := defaultTransferName(fields[2])
 	if len(fields) == 4 {
 		localName = fields[3]
 	}
-	if err := copyFromTargetSelector(ctx, cfg, st, fields[1], fields[2], localName); err != nil {
-		return "", err
-	}
-	return transferText("⬅️ get", fields[1], fields[2], localName), nil
+	return copyFromTargetSelector(ctx, cfg, st, fields[1], fields[2], localName)
 }
 
-func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) (string, error) {
+func handlePut(ctx context.Context, cfg *config.Config, st *agent.State, fields []string) error {
 	if len(fields) < 3 || len(fields) > 4 {
-		return "", errors.New("usage: put <target> <local-file> [remote-file]")
+		return errors.New("usage: put <target> <local-file> [remote-file]")
 	}
 	remoteName := defaultTransferName(fields[2])
 	if len(fields) == 4 {
 		remoteName = fields[3]
 	}
-	if err := copyToTargetSelector(ctx, cfg, st, fields[1], fields[2], remoteName); err != nil {
-		return "", err
-	}
-	return transferText("➡️ put", fields[1], fields[2], remoteName), nil
+	return copyToTargetSelector(ctx, cfg, st, fields[1], fields[2], remoteName)
 }
 
 func defaultTransferName(name string) string {
@@ -2208,20 +2146,27 @@ const (
 )
 
 func runText(target, command, output string) string {
-	text := actionText("▶️ run", target) +
-		"\n" + htmlBlock(command, maxCommandBytes)
-	return text + outputBlock(output)
+	return actionText("▶️ run", target) + "\n" + codeQuote(command, maxCommandBytes) + "\n" + outputText(output)
 }
 
 func runStartText(target, command string) string {
-	return actionStartText("▶️ run", target) +
-		"\n" + htmlBlock(command, maxCommandBytes)
+	return "⏳ " + actionText("▶️ run", target) + "\n" + codeQuote(command, maxCommandBytes)
 }
 
 func runErrorText(target, command, output, reason string) string {
-	text := actionErrorText("▶️ run", target, reason) +
-		"\n" + htmlBlock(command, maxCommandBytes)
-	return text + outputBlock(output)
+	return "❌ " + actionText("▶️ run", target) + reasonText(reason) + "\n" + codeQuote(command, maxCommandBytes) + "\n" + outputText(output)
+}
+
+// chatRunText omits target and command: the reply quotes the request.
+func chatRunText(output, reason string) string {
+	if reason == "" {
+		return outputText(output)
+	}
+	text := errorText(html.EscapeString(reason))
+	if output != "" {
+		text += "\n" + codeQuote(output, maxOutputBytes)
+	}
+	return text
 }
 
 func runStartAuditText(a *auditState, target, command string) string {
@@ -2244,15 +2189,23 @@ func runAuditText(a *auditState, target, command, output, reason string) string 
 	return runText(target, command, output)
 }
 
-func outputBlock(output string) string {
+func outputText(output string) string {
 	if output == "" {
-		return "\n(no output)"
+		return "(no output)"
 	}
-	return "\n" + htmlBlock(output, maxOutputBytes)
+	return codeQuote(output, maxOutputBytes)
 }
 
-func htmlBlock(s string, budget int) string {
-	return "<pre>" + escapedCodeBlock(s, budget) + "</pre>"
+func codeQuote(s string, budget int) string {
+	return "<blockquote>" + inlineCode(s, budget) + "</blockquote>"
+}
+
+func inlineCode(s string, budget int) string {
+	return "<code>" + escapedCodeBlock(s, budget) + "</code>"
+}
+
+func reasonText(reason string) string {
+	return " (" + html.EscapeString(reason) + ")"
 }
 
 func actionText(action, target string) string {
@@ -2263,35 +2216,20 @@ func actionStartText(action, target string) string {
 	return "⏳ " + actionText(action, target)
 }
 
-func actionErrorText(action, target, reason string) string {
-	return "❌ " + actionText(action, target) + " (" + html.EscapeString(reason) + ")"
-}
-
 func transferText(op, target, source, destination string) string {
-	text := actionText(op, target) +
-		"\n" + htmlBlock(source, maxPathBytes)
+	text := actionText(op, target) + " " + inlineCode(source, maxPathBytes)
 	if destination != source {
-		text += "\n" + htmlBlock(destination, maxPathBytes)
+		text += " → " + inlineCode(destination, maxPathBytes)
 	}
 	return text
 }
 
 func transferStartText(op, target, source, destination string) string {
-	text := actionStartText(op, target) +
-		"\n" + htmlBlock(source, maxPathBytes)
-	if destination != source {
-		text += "\n" + htmlBlock(destination, maxPathBytes)
-	}
-	return text
+	return "⏳ " + transferText(op, target, source, destination)
 }
 
 func transferErrorText(op, target, source, destination, reason string) string {
-	text := actionErrorText(op, target, reason) +
-		"\n" + htmlBlock(source, maxPathBytes)
-	if destination != source {
-		text += "\n" + htmlBlock(destination, maxPathBytes)
-	}
-	return text
+	return "❌ " + transferText(op, target, source, destination) + reasonText(reason)
 }
 
 func transferStartAuditText(a *auditState, op, target, source, destination string) string {

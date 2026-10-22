@@ -18,14 +18,16 @@ import (
 
 // In digest level, successful control-socket run/get/put are counted per
 // action and target and reported at the top of each hour, on loglevel change,
-// on shutdown and on demand; failures are reported immediately. A digest covers
-// the time since the previous one; an hour without calls sends nothing and
-// keeps the interval open, an explicit request answers "no calls". Counts are
-// mirrored to the store on every change and cleared only after the digest is
-// queued for at least one recipient, so a crash or an unavailable transport
-// repeats or delays a digest instead of losing it; counts left by a previous
-// process are reported at startup. A call is counted when it starts in digest
-// level; if its count cannot be stored it is reported immediately instead.
+// before a lock or seal notice, on shutdown and on demand; failures are
+// reported immediately. A digest covers the time since the previous one and a
+// call belongs to the digest in which it completes; an hour without calls
+// sends nothing and keeps the interval open, an explicit request answers "no
+// calls". Counts are mirrored to the store on every change and cleared only
+// after the digest is queued for at least one recipient, so a crash or an
+// unavailable transport repeats or delays a digest instead of losing it;
+// counts left by a previous process are reported at startup. A call is
+// counted if it starts in digest level; if its count cannot be stored it is
+// reported immediately instead.
 type auditState struct {
 	mu       sync.Mutex
 	logLevel string
@@ -163,6 +165,11 @@ func (a *auditState) digestTextLocked(end time.Time) []string {
 		text += line
 	}
 	return append(texts, text)
+}
+
+func notifyLockState(hub *transportHub, audit *auditState, text string, origin *transport.Message) {
+	audit.sendDigest(hub, origin, time.Now(), false)
+	hub.notify(false, text, origin)
 }
 
 func runDigest(ctx context.Context, hub *transportHub, audit *auditState) {

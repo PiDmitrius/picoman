@@ -164,13 +164,13 @@ func (s *controlServer) unseal(args [][]byte) ([][]byte, error) {
 
 func (s *controlServer) seal(_ [][]byte) ([][]byte, error) {
 	s.st.Seal()
-	s.hub.notify(false, "⚪ sealed", nil)
+	notifyLockState(s.hub, s.audit, "⚪ sealed", nil)
 	return nil, nil
 }
 
 func (s *controlServer) lock(_ [][]byte) ([][]byte, error) {
 	s.st.Lock()
-	s.hub.notify(false, "🔒 locked", nil)
+	notifyLockState(s.hub, s.audit, "🔒 locked", nil)
 	return nil, nil
 }
 
